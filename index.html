@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Decision Ledger | 投資決策分析</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主要導覽">
+        <div>
+          <p class="eyebrow">Decision Ledger</p>
+          <h1>投資決策分析</h1>
+        </div>
+        <nav>
+          <a href="#dashboard" class="active">首頁 Dashboard</a>
+          <a href="#portfolio">我的投資組合</a>
+          <a href="#compare">股票比較引擎</a>
+          <a href="#dca">定期定額模擬</a>
+          <a href="#ranking">台股排行榜</a>
+          <a href="#risk-position">高低位分析</a>
+          <a href="#advanced">進階分析</a>
+          <a href="#architecture">資料與 API</a>
+        </nav>
+        <div class="data-note">
+          <strong>示範版資料</strong>
+          <span>內建台股價格、成交量、市值與類股樣本；下一階段可接 FinMind 或證交所 API。</span>
+        </div>
+      </aside>
+
+      <main>
+        <section id="dashboard" class="toolbar">
+          <div>
+            <p class="eyebrow">Product Prototype</p>
+            <h2>輸入真實交易，檢查決策品質</h2>
+          </div>
+          <div class="toolbar-actions">
+            <label for="benchmarkSelect">假設比較標的</label>
+            <select id="benchmarkSelect"></select>
+          </div>
+        </section>
+        <div id="marketStatus" class="market-status">正在準備市場資料...</div>
+
+        <section class="panel watchlist-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">My Stock List</p>
+              <h3>我的公司股票清單</h3>
+            </div>
+            <form id="watchlistForm" class="inline-form">
+              <input id="stockSearchInput" list="stockSearchList" placeholder="輸入代號或名稱，例如 2330 台積電" />
+              <datalist id="stockSearchList"></datalist>
+              <button type="submit">新增股票</button>
+            </form>
+          </div>
+          <div id="watchlistChips" class="selected-list"></div>
+        </section>
+
+        <section class="metric-grid" aria-label="投資績效摘要">
+          <article class="metric">
+            <span>總投入</span>
+            <strong id="totalInvested">--</strong>
+          </article>
+          <article class="metric">
+            <span>目前市值</span>
+            <strong id="currentValue">--</strong>
+          </article>
+          <article class="metric">
+            <span>總報酬</span>
+            <strong id="totalReturn">--</strong>
+          </article>
+          <article class="metric">
+            <span>最大跌幅 MDD</span>
+            <strong id="maxDrawdown">--</strong>
+          </article>
+        </section>
+
+        <section class="content-grid">
+          <article class="panel chart-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Dashboard</p>
+                <h3>真實資產曲線 vs 假設標的</h3>
+              </div>
+              <div class="legend">
+                <span><i class="real"></i>真實投資</span>
+                <span><i class="alt"></i>假設標的</span>
+              </div>
+            </div>
+            <canvas id="equityChart" width="920" height="360" aria-label="資產曲線圖"></canvas>
+          </article>
+
+          <article class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">What-if</p>
+                <h3>同條件替代結果</h3>
+              </div>
+            </div>
+            <div id="scenarioRanking" class="ranking-list"></div>
+          </article>
+        </section>
+
+        <section id="transactions" class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Transactions</p>
+              <h3>投資紀錄輸入</h3>
+            </div>
+          </div>
+          <form id="tradeForm" class="trade-form">
+            <label>
+              股票
+              <select id="symbolInput" required></select>
+            </label>
+            <label>
+              買入日期
+              <input id="dateInput" type="date" required />
+            </label>
+            <label>
+              投入金額
+              <input id="amountInput" type="number" min="1000" step="1000" required />
+            </label>
+            <label>
+              買入價，可空白
+              <input id="priceInput" type="number" min="1" step="0.01" placeholder="自動用當日收盤價" />
+            </label>
+            <button type="submit">加入交易</button>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>股票</th>
+                  <th>投入</th>
+                  <th>買入價</th>
+                  <th>目前市值</th>
+                  <th>報酬</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="tradeTable"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="portfolio" class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Portfolio Engine</p>
+              <h3>我的投資組合</h3>
+            </div>
+            <div class="inline-controls">
+              <label for="portfolioAmount">投入金額</label>
+              <input id="portfolioAmount" type="number" min="10000" step="10000" value="300000" />
+            </div>
+          </div>
+          <form id="portfolioAddForm" class="inline-form module-add">
+            <select id="portfolioAddSelect"></select>
+            <button type="submit">加入組合</button>
+          </form>
+          <div id="portfolioWeights" class="weight-grid"></div>
+          <div class="analysis-grid" id="portfolioResults"></div>
+        </section>
+
+        <section id="compare" class="panel chart-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Stock Compare</p>
+              <h3>股票比較引擎</h3>
+            </div>
+            <div class="inline-controls">
+              <label for="comparePeriod">時間</label>
+              <select id="comparePeriod">
+                <option value="1d">1天</option>
+                <option value="1w">1週</option>
+                <option value="1m">1月</option>
+                <option value="1y" selected>1年</option>
+                <option value="all">自訂全部</option>
+              </select>
+            </div>
+          </div>
+          <form id="compareAddForm" class="inline-form module-add">
+            <select id="compareAddSelect"></select>
+            <button type="submit">加入比較</button>
+          </form>
+          <div id="compareChips" class="selected-list"></div>
+          <canvas id="compareBarChart" width="920" height="360" aria-label="多股票報酬長條圖"></canvas>
+        </section>
+
+        <section id="dca" class="panel chart-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">DCA Engine</p>
+              <h3>定期定額模擬</h3>
+            </div>
+            <div class="inline-controls dca-controls">
+              <label>
+                頻率
+                <select id="dcaFrequency">
+                  <option value="monthly" selected>每月</option>
+                  <option value="weekly">每週</option>
+                </select>
+              </label>
+              <label>
+                每期金額
+                <input id="dcaAmount" type="number" min="1000" step="1000" value="10000" />
+              </label>
+              <label>
+                開始日期
+                <input id="dcaStartDate" type="date" />
+              </label>
+              <label>
+                結束日期
+                <input id="dcaEndDate" type="date" />
+              </label>
+            </div>
+          </div>
+          <form id="dcaAddForm" class="inline-form module-add">
+            <select id="dcaAddSelect"></select>
+            <button type="submit">加入標的</button>
+          </form>
+          <div id="dcaChips" class="selected-list"></div>
+          <section class="metric-grid compact" aria-label="定期定額結果">
+            <article class="metric">
+              <span>累積投入</span>
+              <strong id="dcaInvested">--</strong>
+            </article>
+            <article class="metric">
+              <span>總資產</span>
+              <strong id="dcaValue">--</strong>
+            </article>
+            <article class="metric">
+              <span>報酬 / 年化</span>
+              <strong id="dcaReturn">--</strong>
+            </article>
+            <article class="metric">
+              <span>MDD</span>
+              <strong id="dcaMdd">--</strong>
+            </article>
+          </section>
+          <canvas id="dcaChart" width="920" height="330" aria-label="投入與資產成長曲線"></canvas>
+          <div id="dcaLegend" class="chart-legend"></div>
+          <div id="dcaResults" class="ranking-list"></div>
+        </section>
+
+        <section id="ranking" class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Market Ranking</p>
+              <h3>台股排行榜</h3>
+            </div>
+            <div class="inline-controls">
+              <label for="rankingPeriod">區間</label>
+              <select id="rankingPeriod">
+                <option value="today" selected>今日</option>
+                <option value="1d">1日</option>
+                <option value="1w">1週</option>
+                <option value="1m">1月</option>
+                <option value="1y">1年</option>
+              </select>
+              <label for="sectorFilter">類股</label>
+              <select id="sectorFilter"></select>
+            </div>
+          </div>
+          <div id="rankingNote" class="section-note"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>排名</th>
+                  <th>股票</th>
+                  <th>區間漲幅</th>
+                  <th>成交量</th>
+                  <th>市值</th>
+                  <th>強勢持續分數</th>
+                </tr>
+              </thead>
+              <tbody id="marketRanking"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="risk-position" class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Position Risk</p>
+              <h3>高低位分析</h3>
+            </div>
+            <select id="riskSymbol"></select>
+          </div>
+          <div id="riskCards" class="analysis-grid"></div>
+        </section>
+
+        <section id="advanced" class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Advanced Analytics</p>
+              <h3>第二階段專業指標</h3>
+            </div>
+          </div>
+          <div id="advancedMetrics" class="analysis-grid wide"></div>
+        </section>
+
+        <section id="what-if" class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Decision Review</p>
+              <h3>單筆交易分析</h3>
+            </div>
+            <select id="tradeSelect"></select>
+          </div>
+          <div id="singleTradeAnalysis" class="analysis-grid"></div>
+        </section>
+
+        <section id="architecture" class="panel method">
+          <p class="eyebrow">Engineering Core</p>
+          <h3>資料架構與 API 設計</h3>
+          <div class="schema-grid">
+            <pre><code>stocks
+- id
+- symbol
+- name
+- market</code></pre>
+            <pre><code>price_history
+- stock_id
+- date
+- close_price</code></pre>
+            <pre><code>portfolios
+- id
+- name</code></pre>
+            <pre><code>portfolio_items
+- portfolio_id
+- stock_id
+- weight</code></pre>
+          </div>
+          <div class="method-grid">
+            <div>
+              <strong>GET /returns</strong>
+              <span>/returns?stocks=2330,2317&period=1y</span>
+            </div>
+            <div>
+              <strong>GET /top</strong>
+              <span>/top?period=1m&limit=50</span>
+            </div>
+            <div>
+              <strong>POST /portfolio/calculate</strong>
+              <span>用 FastAPI + Pandas 計算組合報酬、MDD、波動、勝率、IRR。</span>
+            </div>
+          </div>
+          <div class="method-grid">
+            <div>
+              <strong>回測引擎</strong>
+              <span>任意時間、任意股票、任意組合，輸出報酬、MDD、波動、勝率。</span>
+            </div>
+            <div>
+              <strong>定期定額引擎</strong>
+              <span>時間序列投入、累積股數、現金流處理；正式版加入 IRR / XIRR。</span>
+            </div>
+            <div>
+              <strong>風險引擎</strong>
+              <span>高低位分數、52 週高低點、200 日均線距離、Sharpe 與相關性。</span>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="data/market-data.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
