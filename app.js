@@ -228,11 +228,21 @@ function optionHtml(symbols, selected = "") {
 function resolveStockInput(value) {
   const text = String(value || "").trim();
   if (!text) return "";
-  const exactCode = text.match(/^\d{4,6}[A-Z]?/)?.[0];
+  const firstToken = text.split(/\s+/)[0].toUpperCase();
+  const exactCode = firstToken.match(/^[A-Z0-9._-]+/)?.[0]?.replace(".", "_").replace("-", "_");
   if (exactCode && stocks[exactCode]) return exactCode;
   const lowered = text.toLowerCase();
+  const prefixMatches = Object.keys(stocks).filter((symbol) => symbol.toLowerCase().startsWith(lowered));
+  if (prefixMatches.length === 1) return prefixMatches[0];
+  if (prefixMatches.length > 1) {
+    const leveragedOrPlain = prefixMatches.find((symbol) => /[A-Z]$/.test(symbol) || symbol.length === lowered.length);
+    if (leveragedOrPlain) return leveragedOrPlain;
+  }
   const match = Object.entries(stocks).find(
-    ([symbol, stock]) => symbol.toLowerCase() === lowered || stock.name.toLowerCase().includes(lowered),
+    ([symbol, stock]) =>
+      symbol.toLowerCase() === lowered ||
+      symbol.toLowerCase().startsWith(lowered) ||
+      stock.name.toLowerCase().includes(lowered),
   );
   return match?.[0] || "";
 }
