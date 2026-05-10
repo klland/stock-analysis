@@ -180,16 +180,28 @@
                 <option value="1w">1週</option>
                 <option value="1m">1月</option>
                 <option value="1y" selected>1年</option>
-                <option value="all">自訂全部</option>
+                <option value="custom">自訂</option>
               </select>
             </div>
+          </div>
+          <div id="compareCustomFields" class="compare-custom-fields" hidden>
+            <label>
+              開始日期
+              <input id="compareStartDate" type="date" />
+            </label>
+            <label>
+              結束日期
+              <input id="compareEndDate" type="date" />
+            </label>
           </div>
           <form id="compareAddForm" class="inline-form module-add">
             <select id="compareAddSelect"></select>
             <button type="submit">加入比較</button>
           </form>
+          <div id="compareBasis" class="section-note"></div>
           <div id="compareChips" class="selected-list"></div>
           <canvas id="compareBarChart" width="920" height="360" aria-label="多股票報酬長條圖"></canvas>
+          <div id="compareBreakdown" class="compare-breakdown"></div>
         </section>
 
         <section id="dca" class="panel chart-panel">

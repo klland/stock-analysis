@@ -105,6 +105,8 @@ const state = {
   portfolioWeights: {},
   compareSymbols: ["2330", "2454", "0050", "2317"],
   comparePeriod: "1y",
+  compareStartDate: "2025-03-17",
+  compareEndDate: "2026-05-08",
   rankingPeriod: "today",
   sector: "全部",
   dcaSymbols: ["0050", "006208"],
@@ -281,13 +283,17 @@ function loadUserState() {
     ["watchlist", "portfolioSymbols", "compareSymbols", "dcaSymbols"].forEach((key) => {
       if (Array.isArray(saved[key])) state[key] = uniqueSymbols(saved[key]);
     });
-    ["benchmark", "riskSymbol", "comparePeriod", "rankingPeriod", "sector", "dcaFrequency", "dcaStartDate", "dcaEndDate"].forEach((key) => {
+    ["benchmark", "riskSymbol", "comparePeriod", "compareStartDate", "compareEndDate", "rankingPeriod", "sector", "dcaFrequency", "dcaStartDate", "dcaEndDate"].forEach((key) => {
       if (saved[key]) state[key] = saved[key];
     });
     if (Number.isFinite(Number(saved.dcaAmount))) state.dcaAmount = Number(saved.dcaAmount);
     if (Number.isFinite(Number(saved.portfolioAmount))) state.portfolioAmount = Number(saved.portfolioAmount);
     if (saved.portfolioWeights && typeof saved.portfolioWeights === "object") state.portfolioWeights = saved.portfolioWeights;
     if (saved.selectedTradeId) state.selectedTradeId = saved.selectedTradeId;
+    if (state.comparePeriod === "all") {
+      state.comparePeriod = "custom";
+      state.compareStartDate = priceDates[0];
+    }
   } catch {
     // Ignore corrupt local state and keep the default starter data.
   }
@@ -308,6 +314,8 @@ function saveUserState() {
         benchmark: state.benchmark,
         selectedTradeId: state.selectedTradeId,
         comparePeriod: state.comparePeriod,
+        compareStartDate: state.compareStartDate,
+        compareEndDate: state.compareEndDate,
         rankingPeriod: state.rankingPeriod,
         sector: state.sector,
         dcaFrequency: state.dcaFrequency,
@@ -466,6 +474,12 @@ function applyTwseMarketData(payload) {
 
   state.marketDataSource = "twse";
   state.marketDataDate = payload.date || payload.fetchedAt.slice(0, 10);
+  if (state.marketDataDate) {
+    const previousLastDate = priceDates.at(-1);
+    priceDates[priceDates.length - 1] = state.marketDataDate;
+    if (!userStateLoaded && state.compareEndDate >= previousLastDate) state.compareEndDate = state.marketDataDate;
+    if (!userStateLoaded && state.dcaEndDate >= previousLastDate) state.dcaEndDate = state.marketDataDate;
+  }
   return added;
 }
 
@@ -595,18 +609,62 @@ function priceAtIndex(symbol, index) {
   return stocks[symbol].prices[Math.max(0, Math.min(index, priceDates.length - 1))];
 }
 
+function dateIndexOnOrAfter(date) {
+  const index = priceDates.findIndex((day) => day >= date);
+  return index === -1 ? priceDates.length - 1 : index;
+}
+
+function dateIndexOnOrBefore(date) {
+  for (let index = priceDates.length - 1; index >= 0; index -= 1) {
+    if (priceDates[index] <= date) return index;
+  }
+  return 0;
+}
+
 function latestPrice(symbol) {
   return stocks[symbol].prices.at(-1);
 }
 
-function periodReturn(symbol, period = "1y") {
-  if ((period === "today" || period === "1d") && stocks[symbol]?.live) {
-    return stocks[symbol].dailyReturn || 0;
+function compareWindow(period = "1y") {
+  if (period === "custom") {
+    const start = dateIndexOnOrAfter(state.compareStartDate);
+    const end = Math.max(start, dateIndexOnOrBefore(state.compareEndDate));
+    return { start, end, label: "自訂" };
   }
   const end = priceDates.length - 1;
   const start = Math.max(0, end - (periodSteps[period] ?? 1));
+  return { start, end, label: $("#comparePeriod")?.selectedOptions?.[0]?.textContent || period };
+}
+
+function periodReturnDetail(symbol, period = "1y") {
+  if ((period === "today" || period === "1d") && stocks[symbol]?.live) {
+    const endPrice = latestPrice(symbol);
+    const returnRate = stocks[symbol].dailyReturn || 0;
+    const startPrice = returnRate === -1 ? endPrice : endPrice / (1 + returnRate);
+    return {
+      symbol,
+      startDate: "前一交易日",
+      endDate: state.marketDataDate || priceDates.at(-1),
+      startPrice,
+      endPrice,
+      returnRate,
+    };
+  }
+  const { start, end } = compareWindow(period);
   const startPrice = priceAtIndex(symbol, start);
-  return latestPrice(symbol) / startPrice - 1;
+  const endPrice = priceAtIndex(symbol, end);
+  return {
+    symbol,
+    startDate: priceDates[start],
+    endDate: priceDates[end],
+    startPrice,
+    endPrice,
+    returnRate: startPrice ? endPrice / startPrice - 1 : 0,
+  };
+}
+
+function periodReturn(symbol, period = "1y") {
+  return periodReturnDetail(symbol, period).returnRate;
 }
 
 function allPeriodReturns(symbol) {
@@ -853,7 +911,7 @@ function drawLineChart(canvas, seriesList, formatter = currency) {
 
 function drawBarChart(canvas, rows) {
   const ctx = canvas.getContext("2d");
-  const padding = { top: 30, right: 112, bottom: 42, left: 210 };
+  const padding = { top: 30, right: 118, bottom: 42, left: 260 };
   canvas.height = Math.max(260, rows.length * 46 + padding.top + padding.bottom);
   const width = canvas.width - padding.left - padding.right;
   const rowHeight = 42;
@@ -891,15 +949,14 @@ function drawBarChart(canvas, rows) {
     ctx.textAlign = "right";
     ctx.fillText(label.length > 14 ? `${label.slice(0, 14)}...` : label, padding.left - 14, y + 17);
     const value = percent.format(row.returnRate);
-    const valueWidth = ctx.measureText(value).width;
     if (row.returnRate >= 0) {
       ctx.textAlign = "left";
       const outsideX = x + barWidth + 10;
       ctx.fillText(value, Math.min(outsideX, canvas.width - padding.right + 8), y + 17);
     } else {
-      ctx.textAlign = "right";
-      const outsideX = x - 10;
-      ctx.fillText(value, Math.max(outsideX, padding.left - valueWidth - 8), y + 17);
+      ctx.textAlign = "left";
+      ctx.fillStyle = "#b42318";
+      ctx.fillText(value, zeroX + 10, y + 17);
     }
   });
   ctx.textAlign = "left";
@@ -969,6 +1026,9 @@ function renderControls() {
   $("#amountInput").value = 1000;
   $("#priceInput").value = latestPrice(list[0] || "2330") || "";
   $("#portfolioAmount").value = state.portfolioAmount;
+  $("#comparePeriod").value = state.comparePeriod;
+  $("#compareStartDate").value = state.compareStartDate;
+  $("#compareEndDate").value = state.compareEndDate;
   $("#dcaStartDate").value = state.dcaStartDate;
   $("#dcaEndDate").value = state.dcaEndDate;
 
@@ -1108,10 +1168,41 @@ function renderPortfolioEngine() {
 }
 
 function renderCompareEngine() {
+  const customFields = $("#compareCustomFields");
+  customFields.hidden = state.comparePeriod !== "custom";
+  if (state.comparePeriod === "custom" && state.compareStartDate > state.compareEndDate) {
+    $("#compareBasis").textContent = "日期區間錯誤：開始日期必須早於結束日期。";
+    drawBarChart($("#compareBarChart"), []);
+    $("#compareBreakdown").innerHTML = "";
+    return;
+  }
+
   const rows = state.compareSymbols
-    .map((symbol) => ({ symbol, returnRate: periodReturn(symbol, state.comparePeriod) }))
+    .map((symbol) => periodReturnDetail(symbol, state.comparePeriod))
     .sort((a, b) => b.returnRate - a.returnRate);
   drawBarChart($("#compareBarChart"), rows);
+
+  const first = rows[0];
+  const periodLabel = state.comparePeriod === "custom" ? "自訂時間" : $("#comparePeriod").selectedOptions[0]?.textContent || state.comparePeriod;
+  const startDate = first?.startDate || "--";
+  const endDate = first?.endDate || "--";
+  $("#compareBasis").textContent =
+    `比較基準：${periodLabel}，用「報酬率 = (結束價 - 起始價) / 起始價」排序。` +
+    `目前區間 ${startDate} 到 ${endDate}；若自訂日期不是資料日期，會使用最接近的可用交易資料點。`;
+
+  $("#compareBreakdown").innerHTML = rows.length
+    ? rows
+      .map(
+        (row) => `
+          <div>
+            <strong>${row.symbol} ${stocks[row.symbol].name}</strong>
+            <span>${row.startDate} ${row.startPrice.toFixed(2)} → ${row.endDate} ${row.endPrice.toFixed(2)}</span>
+            <b class="${classForReturn(row.returnRate)}">${percent.format(row.returnRate)}</b>
+          </div>
+        `,
+      )
+      .join("")
+    : `<div><strong>尚未選擇股票</strong><span>先加入要比較的標的。</span><b>--</b></div>`;
 }
 
 function renderDcaEngine() {
@@ -1297,6 +1388,16 @@ function bindEvents() {
 
   $("#comparePeriod").addEventListener("change", (event) => {
     state.comparePeriod = event.target.value;
+    saveUserState();
+    renderCompareEngine();
+  });
+  $("#compareStartDate").addEventListener("change", (event) => {
+    state.compareStartDate = event.target.value || priceDates[0];
+    saveUserState();
+    renderCompareEngine();
+  });
+  $("#compareEndDate").addEventListener("change", (event) => {
+    state.compareEndDate = event.target.value || priceDates.at(-1);
     saveUserState();
     renderCompareEngine();
   });

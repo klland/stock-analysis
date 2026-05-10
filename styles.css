@@ -465,6 +465,43 @@ td:last-child {
   margin-top: 1rem;
 }
 
+.compare-custom-fields {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.compare-custom-fields[hidden] {
+  display: none;
+}
+
+.compare-custom-fields label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.compare-breakdown {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.85rem;
+}
+
+.compare-breakdown div {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(18rem, 1.5fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.compare-breakdown span {
+  color: var(--muted);
+}
+
 .dca-controls {
   flex-wrap: wrap;
 }
@@ -634,6 +671,15 @@ code {
   .inline-form {
     width: 100%;
     align-items: stretch;
+    flex-direction: column;
+  }
+
+  .compare-custom-fields,
+  .compare-breakdown div {
+    grid-template-columns: 1fr;
+  }
+
+  .compare-custom-fields {
     flex-direction: column;
   }
 }
