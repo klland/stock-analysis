@@ -101,6 +101,8 @@ const state = {
   selectedTradeId: trades[0].id,
   watchlist: ["2330", "2454", "0050", "006208", "2317"],
   portfolioSymbols: ["2330", "0050", "2454", "2881"],
+  portfolioAmount: 300000,
+  portfolioWeights: {},
   compareSymbols: ["2330", "2454", "0050", "2317"],
   comparePeriod: "1y",
   rankingPeriod: "today",
@@ -117,7 +119,11 @@ const state = {
 
 const TWSE_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL";
 const TWSE_COMPANY_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L";
+const TPEX_DAILY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=EW&o=data";
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
+const USER_STATE_KEY = "decision-ledger-user-state-v1";
+const usEtfSymbols = new Set(["SPY", "QQQ", "VOO", "VTI", "IVV", "SCHD", "VGT", "XLK", "SMH", "SOXX", "DIA", "IWM", "TLT", "BND", "AGG", "IBIT"]);
+let userStateLoaded = false;
 
 const sectorNames = {
   "01": "水泥",
@@ -196,8 +202,26 @@ function formatMarketCap(value) {
   return `${(value / 100_000_000).toFixed(value >= 100_000_000_000 ? 0 : 1)} 億`;
 }
 
+function formatVolume(value) {
+  if (!Number.isFinite(value) || value <= 0) return "--";
+  const lots = value >= 1_000_000 ? value / 1000 : value;
+  return `${compactCurrency.format(lots)} 張`;
+}
+
 function isCompanyStock(symbol) {
   return /^[1-9]\d{3}$/.test(symbol);
+}
+
+function isTaiwanSymbol(symbol) {
+  return /^([0-9]{4,6}[A-Z]?|[0-9]{4}[A-Z])$/.test(symbol);
+}
+
+function isTaiwanFundSymbol(symbol) {
+  return /^(00|02)\d{2,4}[A-Z]?$/.test(symbol);
+}
+
+function isTaiwanRankingSymbol(symbol) {
+  return (isCompanyStock(symbol) || isTaiwanFundSymbol(symbol)) && stocks[symbol]?.market !== "US";
 }
 
 function setMarketStatus(message, kind = "info") {
@@ -231,6 +255,8 @@ function resolveStockInput(value) {
   const firstToken = text.split(/\s+/)[0].toUpperCase();
   const exactCode = firstToken.match(/^[A-Z0-9._-]+/)?.[0]?.replace(".", "_").replace("-", "_");
   if (exactCode && stocks[exactCode]) return exactCode;
+  if (exactCode && exactCode.length === 5 && stocks[`${exactCode}L`]) return `${exactCode}L`;
+  if (exactCode && exactCode.length === 5 && stocks[`${exactCode}A`]) return `${exactCode}A`;
   const lowered = text.toLowerCase();
   const prefixMatches = Object.keys(stocks).filter((symbol) => symbol.toLowerCase().startsWith(lowered));
   if (prefixMatches.length === 1) return prefixMatches[0];
@@ -247,6 +273,61 @@ function resolveStockInput(value) {
   return match?.[0] || "";
 }
 
+function loadUserState() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(USER_STATE_KEY) || "null");
+    if (!saved) return;
+    if (Array.isArray(saved.trades)) trades = saved.trades.filter((trade) => trade.id && stocks[trade.symbol]);
+    ["watchlist", "portfolioSymbols", "compareSymbols", "dcaSymbols"].forEach((key) => {
+      if (Array.isArray(saved[key])) state[key] = uniqueSymbols(saved[key]);
+    });
+    ["benchmark", "riskSymbol", "comparePeriod", "rankingPeriod", "sector", "dcaFrequency", "dcaStartDate", "dcaEndDate"].forEach((key) => {
+      if (saved[key]) state[key] = saved[key];
+    });
+    if (Number.isFinite(Number(saved.dcaAmount))) state.dcaAmount = Number(saved.dcaAmount);
+    if (Number.isFinite(Number(saved.portfolioAmount))) state.portfolioAmount = Number(saved.portfolioAmount);
+    if (saved.portfolioWeights && typeof saved.portfolioWeights === "object") state.portfolioWeights = saved.portfolioWeights;
+    if (saved.selectedTradeId) state.selectedTradeId = saved.selectedTradeId;
+  } catch {
+    // Ignore corrupt local state and keep the default starter data.
+  }
+}
+
+function saveUserState() {
+  try {
+    localStorage.setItem(
+      USER_STATE_KEY,
+      JSON.stringify({
+        trades,
+        watchlist: state.watchlist,
+        portfolioSymbols: state.portfolioSymbols,
+        portfolioAmount: state.portfolioAmount,
+        portfolioWeights: state.portfolioWeights,
+        compareSymbols: state.compareSymbols,
+        dcaSymbols: state.dcaSymbols,
+        benchmark: state.benchmark,
+        selectedTradeId: state.selectedTradeId,
+        comparePeriod: state.comparePeriod,
+        rankingPeriod: state.rankingPeriod,
+        sector: state.sector,
+        dcaFrequency: state.dcaFrequency,
+        dcaAmount: state.dcaAmount,
+        dcaStartDate: state.dcaStartDate,
+        dcaEndDate: state.dcaEndDate,
+        riskSymbol: state.riskSymbol,
+      }),
+    );
+  } catch {
+    // localStorage may be disabled in some file:// contexts.
+  }
+}
+
+function hydrateUserStateOnce() {
+  if (userStateLoaded) return;
+  loadUserState();
+  userStateLoaded = true;
+}
+
 function syncSelections() {
   const list = visibleSymbols();
   if (!list.includes(state.benchmark)) state.benchmark = list[0] || "2330";
@@ -254,9 +335,6 @@ function syncSelections() {
   state.compareSymbols = uniqueSymbols(state.compareSymbols.filter((symbol) => list.includes(symbol)));
   state.portfolioSymbols = uniqueSymbols(state.portfolioSymbols.filter((symbol) => list.includes(symbol)));
   state.dcaSymbols = uniqueSymbols(state.dcaSymbols.filter((symbol) => list.includes(symbol)));
-  if (state.compareSymbols.length === 0 && list[0]) state.compareSymbols = [list[0]];
-  if (state.portfolioSymbols.length === 0 && list[0]) state.portfolioSymbols = [list[0]];
-  if (state.dcaSymbols.length === 0 && list[0]) state.dcaSymbols = [list[0]];
 }
 
 function readCache() {
@@ -285,17 +363,70 @@ function writeCache(payload) {
   }
 }
 
-async function fetchTwseMarketData() {
-  const [dailyResponse, companyResponse] = await Promise.all([
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === '"' && quoted && next === '"') {
+      cell += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === "," && !quoted) {
+      row.push(cell);
+      cell = "";
+    } else if ((char === "\n" || char === "\r") && !quoted) {
+      if (cell || row.length) {
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = "";
+      }
+      if (char === "\r" && next === "\n") index += 1;
+    } else {
+      cell += char;
+    }
+  }
+  if (cell || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  const headers = rows.shift() || [];
+  return rows.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] || ""])));
+}
+
+function latestTradingDate() {
+  const date = new Date();
+  date.setHours(date.getHours() - 18);
+  while (date.getDay() === 0 || date.getDay() === 6) {
+    date.setDate(date.getDate() - 1);
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function isFreshMarketPayload(payload) {
+  if (!payload?.date) return false;
+  const payloadDate = payload.date.includes("-") ? payload.date : rocDateToIso(payload.date);
+  return payloadDate >= latestTradingDate();
+}
+
+async function fetchMarketData() {
+  const [dailyResponse, companyResponse, tpexResponse] = await Promise.all([
     fetch(TWSE_DAILY_URL, { cache: "no-store" }),
     fetch(TWSE_COMPANY_URL, { cache: "no-store" }),
+    fetch(TPEX_DAILY_URL, { cache: "no-store" }),
   ]);
-  if (!dailyResponse.ok || !companyResponse.ok) {
+  if (!dailyResponse.ok || !companyResponse.ok || !tpexResponse.ok) {
     throw new Error("TWSE API request failed");
   }
   const daily = await dailyResponse.json();
   const companies = await companyResponse.json();
-  return { daily, companies, fetchedAt: new Date().toISOString(), date: rocDateToIso(daily[0]?.Date) };
+  const tpexDaily = parseCsv(await tpexResponse.text());
+  return { daily, companies, tpexDaily, fetchedAt: new Date().toISOString(), date: rocDateToIso(daily[0]?.Date) };
 }
 
 function applyTwseMarketData(payload) {
@@ -305,11 +436,13 @@ function applyTwseMarketData(payload) {
   payload.daily.forEach((row) => {
     const symbol = row.Code;
     const close = toNumber(row.ClosingPrice);
-    if (!symbol || !close || !isCompanyStock(symbol)) return;
+    if (!symbol || !close || !isTaiwanSymbol(symbol)) return;
 
     const company = companyMap.get(symbol);
     const issuedShares = toNumber(company?.["已發行普通股數或TDR原股發行股數"]);
-    const sector = sectorNames[company?.["產業別"]] || stocks[symbol]?.sector || "上市公司";
+    const sector = isTaiwanFundSymbol(symbol)
+      ? "ETF / ETN"
+      : sectorNames[company?.["產業別"]] || stocks[symbol]?.sector || "上市公司";
     const previous = close - toNumber(row.Change);
     const generatedPrices = stocks[symbol]?.prices?.length
       ? [...stocks[symbol].prices.slice(0, -1), close]
@@ -320,7 +453,7 @@ function applyTwseMarketData(payload) {
       market: "TWSE",
       sector,
       volume: toNumber(row.TradeVolume),
-      marketCap: issuedShares * close,
+      marketCap: issuedShares ? issuedShares * close : stocks[symbol]?.marketCap || 0,
       issuedShares,
       live: true,
       dailyChange: toNumber(row.Change),
@@ -377,7 +510,7 @@ function applyUsMarketData(payload) {
     stocks[symbol] = {
       name: row.name || symbol,
       market: "US",
-      sector: symbol.length <= 4 && ["SPY", "QQQ", "VOO", "VTI", "DIA", "IWM", "TLT", "IBIT"].includes(symbol) ? "US ETF" : "US Stock",
+      sector: usEtfSymbols.has(symbol) ? "US ETF" : "US Stock",
       volume: toNumber(row.volume),
       marketCap: 0,
       live: true,
@@ -396,10 +529,11 @@ function applyUsMarketData(payload) {
 async function loadDailyMarketData() {
   const today = new Date().toISOString().slice(0, 10);
   const bundled = normalizeMarketPayload(window.TWSE_MARKET_DATA);
-  if (bundled?.fetchedAt) {
+  if (bundled?.fetchedAt && isFreshMarketPayload(bundled)) {
     const added = applyTwseMarketData(bundled);
     const tpexAdded = applyTpexMarketData(bundled);
     const usAdded = applyUsMarketData(bundled);
+    hydrateUserStateOnce();
     renderControls();
     render();
     setMarketStatus(`已載入本地每日資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔；排程會每天收盤後更新。`, "ok");
@@ -411,6 +545,7 @@ async function loadDailyMarketData() {
     const added = applyTwseMarketData(cache);
     const tpexAdded = applyTpexMarketData(cache);
     const usAdded = applyUsMarketData(cache);
+    hydrateUserStateOnce();
     renderControls();
     render();
     setMarketStatus(`已載入每日快取 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "ok");
@@ -418,19 +553,31 @@ async function loadDailyMarketData() {
   }
 
   try {
-    setMarketStatus("正在從證交所 OpenAPI 取得每日收盤行情與上市公司資料...");
-    const payload = await fetchTwseMarketData();
-    const cachePayload = { ...payload, cachedAt: today };
+    setMarketStatus("正在從證交所與櫃買中心取得每日收盤行情...");
+    const payload = await fetchMarketData();
+    const cachePayload = { ...payload, usDaily: bundled?.usDaily || cache?.usDaily || [], cachedAt: today };
     writeCache(cachePayload);
     const added = applyTwseMarketData(cachePayload);
     const tpexAdded = applyTpexMarketData(cachePayload);
     const usAdded = applyUsMarketData(cachePayload);
+    hydrateUserStateOnce();
     renderControls();
     render();
-    setMarketStatus(`已更新每日資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "ok");
+    setMarketStatus(`已更新每日資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔；美股 ${usAdded} 檔沿用本地快照，會由每日更新腳本刷新。`, "ok");
   } catch (error) {
     console.warn(error);
-    setMarketStatus("證交所資料暫時無法載入，已改用內建樣本；重新整理時會再自動嘗試。", "warn");
+    if (bundled?.fetchedAt) {
+      const added = applyTwseMarketData(bundled);
+      const tpexAdded = applyTpexMarketData(bundled);
+      const usAdded = applyUsMarketData(bundled);
+      hydrateUserStateOnce();
+      renderControls();
+      render();
+      setMarketStatus(`即時資料暫時無法載入，先使用本地快照 ${state.marketDataDate}：TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "warn");
+      return;
+    }
+    hydrateUserStateOnce();
+    setMarketStatus("每日資料暫時無法載入，已改用內建樣本；重新整理時會再自動嘗試。", "warn");
   }
 }
 
@@ -558,6 +705,12 @@ function portfolioWeights() {
   return inputs.map((input) => ({ symbol: input.dataset.weight, weight: Number(input.value) / 100 || 0 }));
 }
 
+function syncPortfolioWeightsFromInputs() {
+  state.portfolioWeights = Object.fromEntries(
+    [...document.querySelectorAll("[data-weight]")].map((input) => [input.dataset.weight, Number(input.value) || 0]),
+  );
+}
+
 function buildWeightedPortfolioSeries(amount) {
   const weights = portfolioWeights();
   return priceDates.map((date, index) => {
@@ -573,15 +726,18 @@ function buildWeightedPortfolioSeries(amount) {
 function buildDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStartDate, endDate = state.dcaEndDate) {
   let invested = 0;
   let shares = 0;
-  const step = state.dcaFrequency === "weekly" ? 1 : 1;
+  let previousDate = "";
   return priceDates
     .map((date, index) => ({ date, index }))
     .filter((point) => point.date >= startDate && point.date <= endDate)
-    .map(({ date, index }, filteredIndex) => {
-    if (filteredIndex % step === 0) {
-      invested += state.dcaAmount;
-      shares += state.dcaAmount / priceAtIndex(symbol, index);
+    .map(({ date, index }) => {
+    const installments = previousDate ? countInstallments(previousDate, date, state.dcaFrequency) : 1;
+    if (installments > 0) {
+      const amount = state.dcaAmount * installments;
+      invested += amount;
+      shares += amount / priceAtIndex(symbol, index);
     }
+    previousDate = date;
     return {
       date,
       invested,
@@ -590,9 +746,28 @@ function buildDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStart
   });
 }
 
+function countInstallments(previousDate, currentDate, frequency) {
+  const previous = new Date(`${previousDate}T00:00:00`);
+  const current = new Date(`${currentDate}T00:00:00`);
+  if (!(current > previous)) return 0;
+  const days = Math.max(1, Math.round((current - previous) / 86_400_000));
+  if (frequency === "weekly") return Math.max(1, Math.floor(days / 7));
+  return Math.max(
+    1,
+    (current.getFullYear() - previous.getFullYear()) * 12 + current.getMonth() - previous.getMonth(),
+  );
+}
+
 function annualizedReturn(totalReturn, years) {
   if (years <= 0) return 0;
   return (1 + totalReturn) ** (1 / years) - 1;
+}
+
+function yearsBetween(startDate, endDate) {
+  const start = new Date(`${startDate}T00:00:00`);
+  const end = new Date(`${endDate}T00:00:00`);
+  if (!(end > start)) return 0;
+  return (end - start) / 31_557_600_000;
 }
 
 function riskPosition(symbol) {
@@ -672,11 +847,14 @@ function drawLineChart(canvas, seriesList, formatter = currency) {
 
 function drawBarChart(canvas, rows) {
   const ctx = canvas.getContext("2d");
-  const padding = { top: 28, right: 94, bottom: 42, left: 210 };
+  const padding = { top: 30, right: 112, bottom: 42, left: 210 };
   canvas.height = Math.max(260, rows.length * 46 + padding.top + padding.bottom);
   const width = canvas.width - padding.left - padding.right;
   const rowHeight = 42;
-  const maxAbs = Math.max(...rows.map((row) => Math.abs(row.returnRate)), 0.1);
+  const positiveMax = Math.max(...rows.map((row) => row.returnRate), 0.02);
+  const negativeMax = Math.abs(Math.min(...rows.map((row) => row.returnRate), 0));
+  const totalRange = positiveMax + negativeMax || 0.1;
+  const zeroX = padding.left + width * (negativeMax / totalRange);
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = "#fbfcfb";
@@ -692,22 +870,31 @@ function drawBarChart(canvas, rows) {
   ctx.strokeStyle = "#dce2dc";
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(padding.left, padding.top - 8);
-  ctx.lineTo(padding.left, padding.top + rows.length * rowHeight);
+  ctx.moveTo(zeroX, padding.top - 8);
+  ctx.lineTo(zeroX, padding.top + rows.length * rowHeight);
   ctx.stroke();
 
   rows.forEach((row, index) => {
     const y = padding.top + index * rowHeight;
-    const barWidth = Math.max(6, Math.abs(row.returnRate) / maxAbs * width);
+    const barWidth = Math.max(6, Math.abs(row.returnRate) / totalRange * width);
+    const x = row.returnRate >= 0 ? zeroX : zeroX - barWidth;
     const label = `${row.symbol} ${stocks[row.symbol].name}`;
     ctx.fillStyle = row.returnRate >= 0 ? "#0f766e" : "#b42318";
-    ctx.fillRect(padding.left, y, barWidth, 24);
+    ctx.fillRect(x, y, barWidth, 24);
     ctx.fillStyle = "#18201b";
     ctx.textAlign = "right";
     ctx.fillText(label.length > 14 ? `${label.slice(0, 14)}...` : label, padding.left - 14, y + 17);
-    ctx.textAlign = "left";
-    const valueX = Math.min(padding.left + barWidth + 10, canvas.width - padding.right + 8);
-    ctx.fillText(percent.format(row.returnRate), valueX, y + 17);
+    const value = percent.format(row.returnRate);
+    const valueWidth = ctx.measureText(value).width;
+    if (row.returnRate >= 0) {
+      ctx.textAlign = "left";
+      const outsideX = x + barWidth + 10;
+      ctx.fillText(value, Math.min(outsideX, canvas.width - padding.right + 8), y + 17);
+    } else {
+      ctx.textAlign = "right";
+      const outsideX = x - 10;
+      ctx.fillText(value, Math.max(outsideX, padding.left - valueWidth - 8), y + 17);
+    }
   });
   ctx.textAlign = "left";
 }
@@ -757,7 +944,7 @@ function renderControls() {
   const list = visibleSymbols();
   const options = optionHtml(list);
   $("#stockSearchList").innerHTML = sortedEntries
-    .filter(([symbol, stock]) => isCompanyStock(symbol) || symbol.startsWith("00") || symbol.startsWith("02") || stock.market === "US")
+    .filter(([symbol, stock]) => isTaiwanSymbol(symbol) || stock.market === "US")
     .map(([symbol, stock]) => `<option value="${symbol} ${stock.name}"></option>`)
     .join("");
   $("#benchmarkSelect").innerHTML = options;
@@ -774,6 +961,7 @@ function renderControls() {
   $("#symbolInput").value = list[0] || "2330";
   $("#dateInput").value = "2024-01-15";
   $("#amountInput").value = 50000;
+  $("#portfolioAmount").value = state.portfolioAmount;
   $("#dcaStartDate").value = state.dcaStartDate;
   $("#dcaEndDate").value = state.dcaEndDate;
 
@@ -791,7 +979,7 @@ function renderControls() {
       (symbol) => `
         <label class="weight-item">
           <span>${symbol} ${stocks[symbol].name}</span>
-          <input data-weight="${symbol}" type="number" min="0" max="100" step="5" value="${defaultWeights[symbol] || 0}" />
+          <input data-weight="${symbol}" type="number" min="0" max="100" step="5" value="${state.portfolioWeights[symbol] ?? defaultWeights[symbol] ?? 0}" />
           <button class="delete-btn" type="button" data-remove-portfolio="${symbol}">刪除</button>
         </label>
       `,
@@ -916,17 +1104,33 @@ function renderCompareEngine() {
 }
 
 function renderDcaEngine() {
+  if (state.dcaStartDate > state.dcaEndDate) {
+    $("#dcaInvested").textContent = "--";
+    $("#dcaValue").textContent = "--";
+    $("#dcaReturn").textContent = "--";
+    $("#dcaMdd").textContent = "--";
+    drawLineChart($("#dcaChart"), []);
+    $("#dcaLegend").innerHTML = "";
+    $("#dcaResults").innerHTML = `<div class="rank-row"><strong>日期區間錯誤</strong><small>開始日期必須早於結束日期。</small></div>`;
+    return;
+  }
+
   const seriesBySymbol = state.dcaSymbols.map((symbol) => ({ symbol, series: buildDcaSeries(symbol) }));
   const primary = seriesBySymbol[0]?.series || [];
-  const latest = primary.at(-1) || { invested: 0, value: 0 };
-  const totalReturn = latest.invested ? latest.value / latest.invested - 1 : 0;
-  const years = 2.3;
-  $("#dcaInvested").textContent = currency.format(latest.invested);
-  $("#dcaValue").textContent = currency.format(latest.value);
-  $("#dcaReturn").textContent = `${percent.format(totalReturn)} / ${percent.format(annualizedReturn(totalReturn, years))}`;
-  $("#dcaReturn").className = classForReturn(totalReturn);
+  const rows = seriesBySymbol.map(({ symbol, series }) => {
+    const last = series.at(-1) || { invested: 0, value: 0 };
+    const rate = last.invested ? last.value / last.invested - 1 : 0;
+    return { symbol, series, last, rate, drawdown: maxDrawdown(series) };
+  });
+  const best = [...rows].sort((a, b) => b.rate - a.rate)[0] || { symbol: "", last: { invested: 0, value: 0 }, rate: 0, drawdown: 0 };
+  const worstDrawdown = rows.reduce((worst, row) => Math.min(worst, row.drawdown), 0);
+  const years = yearsBetween(state.dcaStartDate, state.dcaEndDate);
+  $("#dcaInvested").textContent = currency.format(best.last.invested);
+  $("#dcaValue").textContent = best.symbol ? `${best.symbol} ${currency.format(best.last.value)}` : "--";
+  $("#dcaReturn").textContent = `${percent.format(best.rate)} / ${percent.format(annualizedReturn(best.rate, years))}`;
+  $("#dcaReturn").className = classForReturn(best.rate);
   $("#dcaMdd").className = "return-negative";
-  $("#dcaMdd").textContent = percent.format(maxDrawdown(primary));
+  $("#dcaMdd").textContent = percent.format(worstDrawdown);
   const colors = ["#0f766e", "#a15c07", "#2563eb", "#7c3aed", "#b42318", "#475569", "#15803d"];
   drawLineChart($("#dcaChart"), [
     ...(primary.length ? [{ series: primary.map((point) => ({ date: point.date, value: point.invested })), color: "#667068" }] : []),
@@ -941,10 +1145,13 @@ function renderDcaEngine() {
   ]
     .map((item) => `<span><i style="background:${item.color}"></i>${item.label}</span>`)
     .join("");
-  $("#dcaResults").innerHTML = seriesBySymbol
-    .map(({ symbol, series }) => {
-      const last = series.at(-1) || { invested: 0, value: 0 };
-      const rate = last.invested ? last.value / last.invested - 1 : 0;
+  if (rows.length === 0) {
+    $("#dcaResults").innerHTML = `<div class="rank-row"><strong>尚未選擇標的</strong><small>先從你的公司股票清單加入一檔股票或 ETF。</small></div>`;
+    return;
+  }
+  $("#dcaResults").innerHTML = rows
+    .sort((a, b) => b.rate - a.rate)
+    .map(({ symbol, last, rate }) => {
       return `
         <div class="rank-row">
           <div>
@@ -960,10 +1167,14 @@ function renderDcaEngine() {
 
 function renderMarketRanking() {
   const isFullMarket = state.rankingPeriod === "today" || state.rankingPeriod === "1d";
-  const sourceSymbols = isFullMarket ? Object.keys(stocks).filter((symbol) => isCompanyStock(symbol)) : visibleSymbols();
+  const sourceSymbols = isFullMarket ? Object.keys(stocks).filter(isTaiwanRankingSymbol) : visibleSymbols().filter(isTaiwanRankingSymbol);
+  const sectors = ["全部", ...new Set(sourceSymbols.map((symbol) => stocks[symbol].sector).filter(Boolean))];
+  $("#sectorFilter").innerHTML = sectors.map((sector) => `<option value="${sector}">${sector}</option>`).join("");
+  if (!sectors.includes(state.sector)) state.sector = "全部";
+  $("#sectorFilter").value = state.sector;
   $("#rankingNote").textContent = isFullMarket
-    ? "今日排行使用證交所每日全市場收盤資料。"
-    : "週 / 月 / 年目前使用你的股票清單比較；全市場歷史排行需要後端歷史資料庫。";
+    ? "今日排行使用證交所與櫃買中心每日全市場收盤資料，含上市櫃普通股、ETF / ETN。"
+    : "週 / 月 / 年目前使用你的台股清單比較；全市場歷史排行需要每日歷史資料庫。";
 
   const rows = sourceSymbols
     .filter((symbol) => state.sector === "全部" || stocks[symbol].sector === state.sector)
@@ -976,6 +1187,11 @@ function renderMarketRanking() {
     .sort((a, b) => b.returnRate - a.returnRate)
     .slice(0, 10);
 
+  if (rows.length === 0) {
+    $("#marketRanking").innerHTML = `<tr><td colspan="6">此條件沒有資料，請改成「全部」類股或先把台股加入我的公司股票清單。</td></tr>`;
+    return;
+  }
+
   $("#marketRanking").innerHTML = rows
     .map((row, index) => {
       const stock = stocks[row.symbol];
@@ -984,7 +1200,7 @@ function renderMarketRanking() {
           <td>${index + 1}</td>
           <td>${row.symbol} ${stock.name}<br><small>${stock.sector}</small></td>
           <td class="${classForReturn(row.returnRate)}">${percent.format(row.returnRate)}</td>
-          <td>${compactCurrency.format(stock.volume)} 張</td>
+          <td>${formatVolume(stock.volume)}</td>
           <td>${formatMarketCap(row.marketCap)}</td>
           <td><span class="score-pill">${row.score}</span></td>
         </tr>
@@ -1058,16 +1274,19 @@ function render() {
 function bindEvents() {
   $("#benchmarkSelect").addEventListener("change", (event) => {
     state.benchmark = event.target.value;
+    saveUserState();
     render();
   });
 
   $("#tradeSelect").addEventListener("change", (event) => {
     state.selectedTradeId = event.target.value;
+    saveUserState();
     renderSingleTradeAnalysis();
   });
 
   $("#comparePeriod").addEventListener("change", (event) => {
     state.comparePeriod = event.target.value;
+    saveUserState();
     renderCompareEngine();
   });
 
@@ -1077,6 +1296,7 @@ function bindEvents() {
     if (!symbol) return;
     state.watchlist = uniqueSymbols([...state.watchlist, symbol]);
     $("#stockSearchInput").value = "";
+    saveUserState();
     renderControls();
     render();
   });
@@ -1088,6 +1308,7 @@ function bindEvents() {
     const symbol = button.dataset.removeWatchlist;
     state.watchlist = state.watchlist.filter((item) => item !== symbol);
     syncSelections();
+    saveUserState();
     renderControls();
     render();
   });
@@ -1097,6 +1318,7 @@ function bindEvents() {
     const symbol = $("#portfolioAddSelect").value;
     if (!symbol) return;
     state.portfolioSymbols = uniqueSymbols([...state.portfolioSymbols, symbol]);
+    saveUserState();
     renderControls();
     renderPortfolioEngine();
   });
@@ -1106,6 +1328,7 @@ function bindEvents() {
     const symbol = $("#compareAddSelect").value;
     if (!symbol) return;
     state.compareSymbols = uniqueSymbols([...state.compareSymbols, symbol]);
+    saveUserState();
     renderControls();
     renderCompareEngine();
   });
@@ -1114,34 +1337,49 @@ function bindEvents() {
     const button = event.target.closest("[data-remove-compare]");
     if (!button) return;
     state.compareSymbols = state.compareSymbols.filter((symbol) => symbol !== button.dataset.removeCompare);
+    saveUserState();
     renderControls();
     renderCompareEngine();
   });
 
-  $("#portfolioAmount").addEventListener("input", renderPortfolioEngine);
-  $("#portfolioWeights").addEventListener("input", renderPortfolioEngine);
+  $("#portfolioAmount").addEventListener("input", () => {
+    state.portfolioAmount = Number($("#portfolioAmount").value) || 0;
+    saveUserState();
+    renderPortfolioEngine();
+  });
+  $("#portfolioWeights").addEventListener("input", () => {
+    syncPortfolioWeightsFromInputs();
+    saveUserState();
+    renderPortfolioEngine();
+  });
   $("#portfolioWeights").addEventListener("click", (event) => {
     const button = event.target.closest("[data-remove-portfolio]");
     if (!button) return;
     state.portfolioSymbols = state.portfolioSymbols.filter((symbol) => symbol !== button.dataset.removePortfolio);
+    delete state.portfolioWeights[button.dataset.removePortfolio];
+    saveUserState();
     renderControls();
     renderPortfolioEngine();
   });
 
   $("#dcaFrequency").addEventListener("change", (event) => {
     state.dcaFrequency = event.target.value;
+    saveUserState();
     renderDcaEngine();
   });
   $("#dcaAmount").addEventListener("input", (event) => {
     state.dcaAmount = Number(event.target.value) || 0;
+    saveUserState();
     renderDcaEngine();
   });
   $("#dcaStartDate").addEventListener("change", (event) => {
     state.dcaStartDate = event.target.value || priceDates[0];
+    saveUserState();
     renderDcaEngine();
   });
   $("#dcaEndDate").addEventListener("change", (event) => {
     state.dcaEndDate = event.target.value || priceDates.at(-1);
+    saveUserState();
     renderDcaEngine();
   });
   $("#dcaAddForm").addEventListener("submit", (event) => {
@@ -1149,6 +1387,7 @@ function bindEvents() {
     const symbol = $("#dcaAddSelect").value;
     if (!symbol) return;
     state.dcaSymbols = uniqueSymbols([...state.dcaSymbols, symbol]);
+    saveUserState();
     renderControls();
     renderDcaEngine();
   });
@@ -1156,20 +1395,24 @@ function bindEvents() {
     const button = event.target.closest("[data-remove-dca]");
     if (!button) return;
     state.dcaSymbols = state.dcaSymbols.filter((symbol) => symbol !== button.dataset.removeDca);
+    saveUserState();
     renderControls();
     renderDcaEngine();
   });
 
   $("#rankingPeriod").addEventListener("change", (event) => {
     state.rankingPeriod = event.target.value;
+    saveUserState();
     renderMarketRanking();
   });
   $("#sectorFilter").addEventListener("change", (event) => {
     state.sector = event.target.value;
+    saveUserState();
     renderMarketRanking();
   });
   $("#riskSymbol").addEventListener("change", (event) => {
     state.riskSymbol = event.target.value;
+    saveUserState();
     renderRiskPosition();
   });
 
@@ -1188,6 +1431,7 @@ function bindEvents() {
     $("#symbolInput").value = symbol;
     $("#dateInput").value = date;
     $("#amountInput").value = amount;
+    saveUserState();
     render();
   });
 
@@ -1195,6 +1439,7 @@ function bindEvents() {
     const button = event.target.closest("[data-delete]");
     if (!button) return;
     trades = trades.filter((trade) => trade.id !== button.dataset.delete);
+    saveUserState();
     render();
   });
 }
