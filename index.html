@@ -119,12 +119,12 @@
               <input id="dateInput" type="date" required />
             </label>
             <label>
-              投入金額
-              <input id="amountInput" type="number" min="1000" step="1000" required />
+              買入股數
+              <input id="amountInput" type="number" min="1" step="1" required />
             </label>
             <label>
-              買入價，可空白
-              <input id="priceInput" type="number" min="1" step="0.01" placeholder="自動用當日收盤價" />
+              買入價
+              <input id="priceInput" type="number" min="0.01" step="0.01" required />
             </label>
             <button type="submit">加入交易</button>
           </form>
@@ -135,8 +135,9 @@
                 <tr>
                   <th>日期</th>
                   <th>股票</th>
-                  <th>投入</th>
+                  <th>股數</th>
                   <th>買入價</th>
+                  <th>投入</th>
                   <th>目前市值</th>
                   <th>報酬</th>
                   <th></th>

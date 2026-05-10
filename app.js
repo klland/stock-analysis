@@ -614,7 +614,8 @@ function allPeriodReturns(symbol) {
 }
 
 function sharesFor(trade, symbol = trade.symbol) {
-  const entryPrice = trade.price || priceOnOrAfter(symbol, trade.date);
+  if (symbol === trade.symbol && Number.isFinite(Number(trade.shares))) return Number(trade.shares);
+  const entryPrice = symbol === trade.symbol && trade.price ? trade.price : priceOnOrAfter(symbol, trade.date);
   return trade.amount / entryPrice;
 }
 
@@ -623,7 +624,8 @@ function currentValueFor(trade, symbol = trade.symbol) {
 }
 
 function returnFor(trade, symbol = trade.symbol) {
-  return currentValueFor(trade, symbol) / trade.amount - 1;
+  const invested = investedAmountFor(trade);
+  return invested ? currentValueFor(trade, symbol) / invested - 1 : 0;
 }
 
 function classForReturn(value) {
@@ -635,9 +637,8 @@ function buildEquitySeries(symbolMode) {
     const value = trades.reduce((sum, trade) => {
       if (trade.date > date) return sum;
       const symbol = symbolMode === "real" ? trade.symbol : symbolMode;
-      const entryPrice = trade.price || priceOnOrAfter(symbol, trade.date);
       const currentPrice = priceAtIndex(symbol, index);
-      return sum + (trade.amount / entryPrice) * currentPrice;
+      return sum + sharesFor(trade, symbol) * currentPrice;
     }, 0);
     return { date, value };
   });
@@ -682,8 +683,13 @@ function sharpeRatio(series) {
   return vol === 0 ? 0 : avg / vol;
 }
 
+function investedAmountFor(trade) {
+  if (Number.isFinite(Number(trade.amount))) return Number(trade.amount);
+  return sharesFor(trade) * (trade.price || priceOnOrAfter(trade.symbol, trade.date));
+}
+
 function summarizePortfolio() {
-  const totalInvested = trades.reduce((sum, trade) => sum + trade.amount, 0);
+  const totalInvested = trades.reduce((sum, trade) => sum + investedAmountFor(trade), 0);
   const currentValue = trades.reduce((sum, trade) => sum + currentValueFor(trade), 0);
   const series = buildEquitySeries("real");
   return {
@@ -695,7 +701,7 @@ function summarizePortfolio() {
 }
 
 function scenarioTotals(symbol) {
-  const invested = trades.reduce((sum, trade) => sum + trade.amount, 0);
+  const invested = trades.reduce((sum, trade) => sum + investedAmountFor(trade), 0);
   const value = trades.reduce((sum, trade) => sum + currentValueFor(trade, symbol), 0);
   return { invested, value, returnRate: invested ? value / invested - 1 : 0 };
 }
@@ -960,7 +966,8 @@ function renderControls() {
   $("#riskSymbol").value = state.riskSymbol;
   $("#symbolInput").value = list[0] || "2330";
   $("#dateInput").value = "2024-01-15";
-  $("#amountInput").value = 50000;
+  $("#amountInput").value = 1000;
+  $("#priceInput").value = latestPrice(list[0] || "2330") || "";
   $("#portfolioAmount").value = state.portfolioAmount;
   $("#dcaStartDate").value = state.dcaStartDate;
   $("#dcaEndDate").value = state.dcaEndDate;
@@ -1030,21 +1037,24 @@ function renderTrades() {
   $("#tradeSelect").value = state.selectedTradeId || "";
 
   if (trades.length === 0) {
-    $("#tradeTable").innerHTML = `<tr><td colspan="7">尚未有交易，請先新增一筆買入紀錄。</td></tr>`;
+    $("#tradeTable").innerHTML = `<tr><td colspan="8">尚未有交易，請先新增一筆買入紀錄。</td></tr>`;
     return;
   }
 
   $("#tradeTable").innerHTML = trades
     .map((trade) => {
       const entryPrice = trade.price || priceOnOrAfter(trade.symbol, trade.date);
+      const shares = sharesFor(trade);
+      const invested = investedAmountFor(trade);
       const value = currentValueFor(trade);
-      const returnRate = value / trade.amount - 1;
+      const returnRate = invested ? value / invested - 1 : 0;
       return `
         <tr>
           <td>${trade.date}</td>
           <td>${trade.symbol} ${stocks[trade.symbol].name}</td>
-          <td>${currency.format(trade.amount)}</td>
+          <td>${shares.toLocaleString("zh-TW", { maximumFractionDigits: 3 })}</td>
           <td>${entryPrice.toFixed(2)}</td>
+          <td>${currency.format(invested)}</td>
           <td>${currency.format(value)}</td>
           <td class="${classForReturn(returnRate)}">${percent.format(returnRate)}</td>
           <td><button class="delete-btn" type="button" data-delete="${trade.id}">刪除</button></td>
@@ -1066,11 +1076,12 @@ function renderSingleTradeAnalysis() {
     .sort((a, b) => b.returnRate - a.returnRate)
     .map((item) => {
       const isReal = item.symbol === trade.symbol ? "真實買入" : "假設買入";
+      const invested = investedAmountFor(trade);
       return `
         <div class="analysis-card">
           <span>${isReal}</span>
           <strong>${item.symbol} ${stocks[item.symbol].name}</strong>
-          <small>${currency.format(trade.amount)} 到 ${currency.format(item.value)}</small>
+          <small>${currency.format(invested)} 到 ${currency.format(item.value)}</small>
           <b class="${classForReturn(item.returnRate)}">${percent.format(item.returnRate)}</b>
         </div>
       `;
@@ -1420,17 +1431,18 @@ function bindEvents() {
     event.preventDefault();
     const symbol = $("#symbolInput").value;
     const date = $("#dateInput").value;
-    const amount = Number($("#amountInput").value);
+    const shares = Number($("#amountInput").value);
     const price = Number($("#priceInput").value);
-    if (!symbol || !date || !amount) return;
+    if (!symbol || !date || !shares || !price) return;
 
-    const trade = { id: makeId(), symbol, date, amount, ...(price > 0 ? { price } : {}) };
+    const trade = { id: makeId(), symbol, date, shares, price, amount: shares * price };
     trades = [trade, ...trades];
     state.selectedTradeId = trade.id;
     event.target.reset();
     $("#symbolInput").value = symbol;
     $("#dateInput").value = date;
-    $("#amountInput").value = amount;
+    $("#amountInput").value = shares;
+    $("#priceInput").value = price;
     saveUserState();
     render();
   });
