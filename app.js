@@ -1281,45 +1281,63 @@ function buildDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStart
 }
 
 async function buildRealDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStartDate, endDate = state.dcaEndDate) {
-  let history = [];
-  try {
-    history = await adjustedHistoryFor(symbol, startDate, endDate);
-  } catch (error) {
-    console.warn(`DCA history unavailable for ${symbol}: ${error.message}`);
-    return { symbol, series: [], cashflows: [], installments: [], error: "歷史日線抓取失敗" };
-  }
-  if (history.length === 0) return { symbol, series: [], cashflows: [], installments: [], error: "沒有可用歷史日線" };
+  const schedule = buildDcaInstallments(startDate, endDate, state.dcaFrequency);
+  const snapshotRequests = await dcaSnapshotRequests(schedule, endDate);
+  if (snapshotRequests.length === 0) return { symbol, series: [], cashflows: [], installments: [], error: "沒有可用官方收盤資料" };
 
-  const installments = buildDcaInstallments(startDate, endDate, state.dcaFrequency)
-    .map((date) => {
-      const point = pricePointOnOrAfter(history, date);
-      return point ? { scheduledDate: date, date: point.date, price: point.value } : null;
+  const installments = snapshotRequests
+    .filter((request) => request.kind === "installment")
+    .map((request) => {
+      const price = closeFromHistoricalSnapshot(symbol, request.snapshot);
+      return price > 0 ? { scheduledDate: request.targetDate, date: request.snapshot.date, price } : null;
     })
     .filter((item) => item && item.date <= endDate);
-  const valuationDates = new Set([startDate, endDate, ...history.filter((point) => point.date >= startDate && point.date <= endDate).map((point) => point.date)]);
+  if (installments.length === 0) return { symbol, series: [], cashflows: [], installments: [], error: "投入日沒有這檔標的價格" };
+
+  const valuationSnapshots = [
+    ...new Map(snapshotRequests.map((request) => [request.snapshot.date, request.snapshot])).values(),
+  ].sort((a, b) => a.date.localeCompare(b.date));
   let invested = 0;
   let shares = 0;
   let installmentIndex = 0;
   const cashflows = [];
-  const series = [...valuationDates].sort().map((date) => {
-    while (installmentIndex < installments.length && installments[installmentIndex].date <= date) {
+  const series = valuationSnapshots.map((snapshot) => {
+    while (installmentIndex < installments.length && installments[installmentIndex].date <= snapshot.date) {
       const installment = installments[installmentIndex];
       invested += state.dcaAmount;
       shares += state.dcaAmount / installment.price;
       cashflows.push({ date: installment.date, amount: -state.dcaAmount });
       installmentIndex += 1;
     }
-    const point = pricePointOnOrBefore(history, date);
+    const price = closeFromHistoricalSnapshot(symbol, snapshot);
     return {
-      date,
+      date: snapshot.date,
       invested,
-      value: point ? shares * point.value : 0,
+      value: price > 0 ? shares * price : 0,
     };
   }).filter((point) => point.invested > 0);
 
   const last = series.at(-1);
   if (last) cashflows.push({ date: last.date, amount: last.value });
   return { symbol, series, cashflows, installments, error: series.length ? "" : "日期區間沒有可用價格" };
+}
+
+async function dcaSnapshotRequests(schedule, endDate) {
+  const requests = [
+    ...schedule.map((date) => ({ kind: "installment", targetDate: date })),
+    { kind: "valuation", targetDate: endDate },
+  ].filter((request) => request.targetDate <= endDate);
+  const cache = new Map();
+  const output = [];
+
+  for (const request of requests) {
+    if (!cache.has(request.targetDate)) {
+      cache.set(request.targetDate, await historicalCloseSnapshotOnOrBefore(request.targetDate));
+    }
+    const snapshot = cache.get(request.targetDate);
+    if (snapshot?.closes) output.push({ ...request, snapshot });
+  }
+  return output;
 }
 
 function dcaValuationPoints(startDate, endDate) {
@@ -1849,7 +1867,7 @@ async function renderDcaEngine() {
 
   const scheduledCount = buildDcaInstallments(state.dcaStartDate, state.dcaEndDate, state.dcaFrequency).length;
   $("#dcaBasis").textContent =
-    `正在取得 ${state.dcaStartDate} 到 ${state.dcaEndDate} 的還原日線，依每期投入金額計算股數與 XIRR 年化...`;
+    `正在取得 ${state.dcaStartDate} 到 ${state.dcaEndDate} 的官方收盤價快照，依每期投入金額計算股數與 XIRR 年化...`;
   $("#dcaInvested").textContent = "--";
   $("#dcaValue").textContent = "--";
   $("#dcaReturn").textContent = "--";
@@ -1868,7 +1886,7 @@ async function renderDcaEngine() {
   $("#dcaBasis").textContent =
     `計算基準：${state.dcaFrequency === "weekly" ? "每週" : "每月"}從開始日投入一次，` +
     `每期 ${currency.format(state.dcaAmount)}，共 ${scheduledCount} 期。` +
-    "排定日若非交易日，使用之後第一個交易日還原收盤價買入；總報酬 = 總資產 / 累積投入 - 1，年化 = 每期現金流 XIRR。";
+    "排定日若非交易日，使用往前最近交易日官方收盤價買入；總報酬 = 總資產 / 累積投入 - 1，年化 = 每期現金流 XIRR。";
   const rows = seriesBySymbol.map(({ symbol, series }) => {
     const last = series.at(-1) || { invested: 0, value: 0 };
     const rate = last.invested ? last.value / last.invested - 1 : 0;
@@ -1877,7 +1895,7 @@ async function renderDcaEngine() {
   });
   const validRows = rows.filter((row) => row.series.length && row.last.invested > 0);
   if (validRows.length === 0) {
-    $("#dcaBasis").textContent = "目前選取標的在這個日期區間都沒有抓到可用還原日線，沒有產生計算結果。";
+    $("#dcaBasis").textContent = "目前選取標的在這個日期區間都沒有抓到可用官方收盤資料，沒有產生計算結果。";
     $("#dcaInvested").textContent = "--";
     $("#dcaValue").textContent = "--";
     $("#dcaReturn").textContent = "--";
