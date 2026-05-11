@@ -127,12 +127,14 @@ const TPEX_HISTORY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quo
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
 const HISTORY_CLOSE_CACHE_KEY = "decision-ledger-history-close-cache-v1";
 const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-adjusted-close-cache-v1";
+const ADJUSTED_HISTORY_CACHE_KEY = "decision-ledger-adjusted-history-cache-v1";
 let marketHistoryPeriods = {};
 const USER_STATE_KEY = "decision-ledger-user-state-v1";
 const usEtfSymbols = new Set(["SPY", "QQQ", "VOO", "VTI", "IVV", "SCHD", "VGT", "XLK", "SMH", "SOXX", "DIA", "IWM", "TLT", "BND", "AGG", "IBIT"]);
 let userStateLoaded = false;
 let singleTradeRenderToken = 0;
 let compareRenderToken = 0;
+let dcaRenderToken = 0;
 
 const sectorNames = {
   "01": "水泥",
@@ -427,6 +429,23 @@ function writeAdjustedCloseCache(cache) {
   }
 }
 
+function readAdjustedHistoryCache() {
+  try {
+    return JSON.parse(localStorage.getItem(ADJUSTED_HISTORY_CACHE_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAdjustedHistoryCache(cache) {
+  try {
+    const entries = Object.entries(cache).slice(-80);
+    localStorage.setItem(ADJUSTED_HISTORY_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // localStorage may be disabled in some file:// contexts.
+  }
+}
+
 function anchoredPriceSeries(symbol, close, fallbackPrices) {
   const existing = stocks[symbol]?.prices;
   if (!existing?.length) return fallbackPrices.slice(-priceDates.length);
@@ -586,6 +605,46 @@ async function adjustedCloseOnOrBefore(symbol, targetDate) {
     return cache[cacheKey];
   }
   return null;
+}
+
+async function adjustedHistoryFor(symbol, startDate, endDate) {
+  const yahooSymbol = yahooSymbolFor(symbol);
+  if (!yahooSymbol) return [];
+
+  const cache = readAdjustedHistoryCache();
+  const cacheKey = `${symbol}:${startDate}:${endDate}`;
+  if (Array.isArray(cache[cacheKey])) return cache[cacheKey];
+
+  const start = Math.floor(new Date(`${addDaysIso(startDate, -10)}T00:00:00Z`).getTime() / 1000);
+  const end = Math.floor(new Date(`${addDaysIso(endDate, 3)}T00:00:00Z`).getTime() / 1000);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?period1=${start}&period2=${end}&interval=1d&events=history%7Cdiv%7Csplit`;
+  const result = await fetchJson(url);
+  const chart = result?.chart?.result?.[0];
+  const timestamps = chart?.timestamp || [];
+  const adjusted = chart?.indicators?.adjclose?.[0]?.adjclose || [];
+  const closes = chart?.indicators?.quote?.[0]?.close || [];
+  const points = timestamps
+    .map((timestamp, index) => ({
+      date: taiwanDateFromTimestamp(timestamp),
+      value: toNumber(adjusted[index]) || toNumber(closes[index]),
+    }))
+    .filter((point) => point.date >= addDaysIso(startDate, -10) && point.date <= addDaysIso(endDate, 3) && point.value > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  cache[cacheKey] = points;
+  writeAdjustedHistoryCache(cache);
+  return points;
+}
+
+function pricePointOnOrAfter(points, date) {
+  return points.find((point) => point.date >= date) || points.at(-1) || null;
+}
+
+function pricePointOnOrBefore(points, date) {
+  for (let index = points.length - 1; index >= 0; index -= 1) {
+    if (points[index].date <= date) return points[index];
+  }
+  return points[0] || null;
 }
 
 function latestTradingDate() {
@@ -1215,6 +1274,42 @@ function buildDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStart
   });
 }
 
+async function buildRealDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStartDate, endDate = state.dcaEndDate) {
+  const history = await adjustedHistoryFor(symbol, startDate, endDate);
+  if (history.length === 0) return { symbol, series: [], cashflows: [], installments: [] };
+
+  const installments = buildDcaInstallments(startDate, endDate, state.dcaFrequency)
+    .map((date) => {
+      const point = pricePointOnOrAfter(history, date);
+      return point ? { scheduledDate: date, date: point.date, price: point.value } : null;
+    })
+    .filter((item) => item && item.date <= endDate);
+  const valuationDates = new Set([startDate, endDate, ...history.filter((point) => point.date >= startDate && point.date <= endDate).map((point) => point.date)]);
+  let invested = 0;
+  let shares = 0;
+  let installmentIndex = 0;
+  const cashflows = [];
+  const series = [...valuationDates].sort().map((date) => {
+    while (installmentIndex < installments.length && installments[installmentIndex].date <= date) {
+      const installment = installments[installmentIndex];
+      invested += state.dcaAmount;
+      shares += state.dcaAmount / installment.price;
+      cashflows.push({ date: installment.date, amount: -state.dcaAmount });
+      installmentIndex += 1;
+    }
+    const point = pricePointOnOrBefore(history, date);
+    return {
+      date,
+      invested,
+      value: point ? shares * point.value : 0,
+    };
+  }).filter((point) => point.invested > 0);
+
+  const last = series.at(-1);
+  if (last) cashflows.push({ date: last.date, amount: last.value });
+  return { symbol, series, cashflows, installments };
+}
+
 function dcaValuationPoints(startDate, endDate) {
   const points = new Map();
   points.set(startDate, nearestDateIndex(startDate));
@@ -1245,6 +1340,36 @@ function buildDcaInstallments(startDate, endDate, frequency) {
 function annualizedReturn(totalReturn, years) {
   if (years <= 0) return 0;
   return (1 + totalReturn) ** (1 / years) - 1;
+}
+
+function xirr(cashflows) {
+  const valid = cashflows.filter((flow) => Number.isFinite(flow.amount) && flow.date);
+  if (!valid.some((flow) => flow.amount < 0) || !valid.some((flow) => flow.amount > 0)) return NaN;
+  const startTime = new Date(`${valid[0].date}T00:00:00`).getTime();
+  const yearsFromStart = (date) => (new Date(`${date}T00:00:00`).getTime() - startTime) / 31_557_600_000;
+  let low = -0.9999;
+  let high = 10;
+  const npv = (rate) => valid.reduce((sum, flow) => sum + flow.amount / (1 + rate) ** yearsFromStart(flow.date), 0);
+  let lowValue = npv(low);
+  let highValue = npv(high);
+  while (lowValue * highValue > 0 && high < 1000) {
+    high *= 2;
+    highValue = npv(high);
+  }
+  if (lowValue * highValue > 0) return NaN;
+  for (let iteration = 0; iteration < 100; iteration += 1) {
+    const mid = (low + high) / 2;
+    const midValue = npv(mid);
+    if (Math.abs(midValue) < 0.01) return mid;
+    if (lowValue * midValue <= 0) {
+      high = mid;
+      highValue = midValue;
+    } else {
+      low = mid;
+      lowValue = midValue;
+    }
+  }
+  return (low + high) / 2;
 }
 
 function yearsBetween(startDate, endDate) {
@@ -1696,7 +1821,8 @@ async function renderCompareEngine() {
     : `<div><strong>尚未選擇股票</strong><span>先加入要比較的標的。</span><b>--</b></div>`;
 }
 
-function renderDcaEngine() {
+async function renderDcaEngine() {
+  const token = ++dcaRenderToken;
   if (state.dcaStartDate > state.dcaEndDate) {
     $("#dcaBasis").textContent = "日期區間錯誤：開始日期必須早於結束日期。";
     $("#dcaInvested").textContent = "--";
@@ -1709,24 +1835,36 @@ function renderDcaEngine() {
     return;
   }
 
-  const seriesBySymbol = state.dcaSymbols.map((symbol) => ({ symbol, series: buildDcaSeries(symbol) }));
   const scheduledCount = buildDcaInstallments(state.dcaStartDate, state.dcaEndDate, state.dcaFrequency).length;
+  $("#dcaBasis").textContent =
+    `正在取得 ${state.dcaStartDate} 到 ${state.dcaEndDate} 的還原日線，依每期投入金額計算股數與 XIRR 年化...`;
+  $("#dcaInvested").textContent = "--";
+  $("#dcaValue").textContent = "--";
+  $("#dcaReturn").textContent = "--";
+  $("#dcaMdd").textContent = "--";
+  drawLineChart($("#dcaChart"), []);
+  $("#dcaLegend").innerHTML = "";
+  $("#dcaResults").innerHTML = "";
+
+  const seriesBySymbol = await Promise.all(state.dcaSymbols.map((symbol) => buildRealDcaSeries(symbol)));
+  if (token !== dcaRenderToken) return;
+
   $("#dcaBasis").textContent =
     `計算基準：${state.dcaFrequency === "weekly" ? "每週" : "每月"}從開始日投入一次，` +
     `每期 ${currency.format(state.dcaAmount)}，共 ${scheduledCount} 期。` +
-    "買入價與估值使用最接近的可用資料點，總資產 = 累積股數 × 期末價格。";
+    "排定日若非交易日，使用之後第一個交易日還原收盤價買入；總報酬 = 總資產 / 累積投入 - 1，年化 = 每期現金流 XIRR。";
   const primary = seriesBySymbol[0]?.series || [];
   const rows = seriesBySymbol.map(({ symbol, series }) => {
     const last = series.at(-1) || { invested: 0, value: 0 };
     const rate = last.invested ? last.value / last.invested - 1 : 0;
-    return { symbol, series, last, rate, drawdown: maxDrawdown(series) };
+    const result = seriesBySymbol.find((item) => item.symbol === symbol);
+    return { symbol, series, last, rate, annualized: xirr(result?.cashflows || []), drawdown: maxDrawdown(series), installments: result?.installments || [] };
   });
-  const best = [...rows].sort((a, b) => b.rate - a.rate)[0] || { symbol: "", last: { invested: 0, value: 0 }, rate: 0, drawdown: 0 };
+  const best = [...rows].sort((a, b) => (Number.isFinite(b.annualized) ? b.annualized : b.rate) - (Number.isFinite(a.annualized) ? a.annualized : a.rate))[0] || { symbol: "", last: { invested: 0, value: 0 }, rate: 0, annualized: NaN, drawdown: 0 };
   const worstDrawdown = rows.reduce((worst, row) => Math.min(worst, row.drawdown), 0);
-  const years = yearsBetween(state.dcaStartDate, state.dcaEndDate);
   $("#dcaInvested").textContent = currency.format(best.last.invested);
   $("#dcaValue").textContent = best.symbol ? `${best.symbol} ${currency.format(best.last.value)}` : "--";
-  $("#dcaReturn").textContent = `${percent.format(best.rate)} / ${percent.format(annualizedReturn(best.rate, years))}`;
+  $("#dcaReturn").textContent = `${percent.format(best.rate)} / ${metricValue(best.annualized)}`;
   $("#dcaReturn").className = classForReturn(best.rate);
   $("#dcaMdd").className = "return-negative";
   $("#dcaMdd").textContent = percent.format(worstDrawdown);
@@ -1749,15 +1887,15 @@ function renderDcaEngine() {
     return;
   }
   $("#dcaResults").innerHTML = rows
-    .sort((a, b) => b.rate - a.rate)
-    .map(({ symbol, last, rate }) => {
+    .sort((a, b) => (Number.isFinite(b.annualized) ? b.annualized : b.rate) - (Number.isFinite(a.annualized) ? a.annualized : a.rate))
+    .map(({ symbol, last, rate, annualized, installments }) => {
       return `
         <div class="rank-row">
           <div>
             <strong>${symbol} ${stocks[symbol].name}</strong>
-            <small>${state.dcaStartDate} 到 ${state.dcaEndDate}，累積投入 ${currency.format(last.invested)}</small>
+            <small>${state.dcaStartDate} 到 ${state.dcaEndDate}，${installments.length} 期，累積投入 ${currency.format(last.invested)}，總資產 ${currency.format(last.value)}</small>
           </div>
-          <strong class="${classForReturn(rate)}">${percent.format(rate)}</strong>
+          <strong class="${classForReturn(rate)}">${percent.format(rate)} / ${metricValue(annualized)}</strong>
         </div>
       `;
     })
