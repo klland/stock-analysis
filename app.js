@@ -518,9 +518,15 @@ function parseTpexHistory(json) {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-  return response.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function fetchTwseHistory(date) {
@@ -1275,8 +1281,14 @@ function buildDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStart
 }
 
 async function buildRealDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStartDate, endDate = state.dcaEndDate) {
-  const history = await adjustedHistoryFor(symbol, startDate, endDate);
-  if (history.length === 0) return { symbol, series: [], cashflows: [], installments: [] };
+  let history = [];
+  try {
+    history = await adjustedHistoryFor(symbol, startDate, endDate);
+  } catch (error) {
+    console.warn(`DCA history unavailable for ${symbol}: ${error.message}`);
+    return { symbol, series: [], cashflows: [], installments: [], error: "歷史日線抓取失敗" };
+  }
+  if (history.length === 0) return { symbol, series: [], cashflows: [], installments: [], error: "沒有可用歷史日線" };
 
   const installments = buildDcaInstallments(startDate, endDate, state.dcaFrequency)
     .map((date) => {
@@ -1307,7 +1319,7 @@ async function buildRealDcaSeries(symbol = state.dcaSymbols[0], startDate = stat
 
   const last = series.at(-1);
   if (last) cashflows.push({ date: last.date, amount: last.value });
-  return { symbol, series, cashflows, installments };
+  return { symbol, series, cashflows, installments, error: series.length ? "" : "日期區間沒有可用價格" };
 }
 
 function dcaValuationPoints(startDate, endDate) {
@@ -1846,22 +1858,40 @@ async function renderDcaEngine() {
   $("#dcaLegend").innerHTML = "";
   $("#dcaResults").innerHTML = "";
 
-  const seriesBySymbol = await Promise.all(state.dcaSymbols.map((symbol) => buildRealDcaSeries(symbol)));
+  const seriesBySymbol = [];
+  for (const symbol of state.dcaSymbols) {
+    seriesBySymbol.push(await buildRealDcaSeries(symbol));
+    if (token !== dcaRenderToken) return;
+  }
   if (token !== dcaRenderToken) return;
 
   $("#dcaBasis").textContent =
     `計算基準：${state.dcaFrequency === "weekly" ? "每週" : "每月"}從開始日投入一次，` +
     `每期 ${currency.format(state.dcaAmount)}，共 ${scheduledCount} 期。` +
     "排定日若非交易日，使用之後第一個交易日還原收盤價買入；總報酬 = 總資產 / 累積投入 - 1，年化 = 每期現金流 XIRR。";
-  const primary = seriesBySymbol[0]?.series || [];
   const rows = seriesBySymbol.map(({ symbol, series }) => {
     const last = series.at(-1) || { invested: 0, value: 0 };
     const rate = last.invested ? last.value / last.invested - 1 : 0;
     const result = seriesBySymbol.find((item) => item.symbol === symbol);
-    return { symbol, series, last, rate, annualized: xirr(result?.cashflows || []), drawdown: maxDrawdown(series), installments: result?.installments || [] };
+    return { symbol, series, last, rate, annualized: xirr(result?.cashflows || []), drawdown: maxDrawdown(series), installments: result?.installments || [], error: result?.error || "" };
   });
-  const best = [...rows].sort((a, b) => (Number.isFinite(b.annualized) ? b.annualized : b.rate) - (Number.isFinite(a.annualized) ? a.annualized : a.rate))[0] || { symbol: "", last: { invested: 0, value: 0 }, rate: 0, annualized: NaN, drawdown: 0 };
-  const worstDrawdown = rows.reduce((worst, row) => Math.min(worst, row.drawdown), 0);
+  const validRows = rows.filter((row) => row.series.length && row.last.invested > 0);
+  if (validRows.length === 0) {
+    $("#dcaBasis").textContent = "目前選取標的在這個日期區間都沒有抓到可用還原日線，沒有產生計算結果。";
+    $("#dcaInvested").textContent = "--";
+    $("#dcaValue").textContent = "--";
+    $("#dcaReturn").textContent = "--";
+    $("#dcaMdd").textContent = "--";
+    drawLineChart($("#dcaChart"), []);
+    $("#dcaLegend").innerHTML = "";
+    $("#dcaResults").innerHTML = rows
+      .map((row) => `<div class="rank-row"><strong>${row.symbol} ${stocks[row.symbol].name}</strong><small>${row.error || "沒有可用資料"}</small><strong>--</strong></div>`)
+      .join("");
+    return;
+  }
+  const primary = validRows[0]?.series || [];
+  const best = [...validRows].sort((a, b) => (Number.isFinite(b.annualized) ? b.annualized : b.rate) - (Number.isFinite(a.annualized) ? a.annualized : a.rate))[0] || { symbol: "", last: { invested: 0, value: 0 }, rate: 0, annualized: NaN, drawdown: 0 };
+  const worstDrawdown = validRows.reduce((worst, row) => Math.min(worst, row.drawdown), 0);
   $("#dcaInvested").textContent = currency.format(best.last.invested);
   $("#dcaValue").textContent = best.symbol ? `${best.symbol} ${currency.format(best.last.value)}` : "--";
   $("#dcaReturn").textContent = `${percent.format(best.rate)} / ${metricValue(best.annualized)}`;
@@ -1871,11 +1901,11 @@ async function renderDcaEngine() {
   const colors = ["#0f766e", "#a15c07", "#2563eb", "#7c3aed", "#b42318", "#475569", "#15803d"];
   drawLineChart($("#dcaChart"), [
     ...(primary.length ? [{ series: primary.map((point) => ({ date: point.date, value: point.invested })), color: "#667068" }] : []),
-    ...seriesBySymbol.map((item, index) => ({ series: item.series, color: colors[index % colors.length] })),
+    ...validRows.map((item, index) => ({ series: item.series, color: colors[index % colors.length] })),
   ]);
   $("#dcaLegend").innerHTML = [
     ...(primary.length ? [{ label: "累積投入", color: "#667068" }] : []),
-    ...seriesBySymbol.map((item, index) => ({
+    ...validRows.map((item, index) => ({
       label: `${item.symbol} ${stocks[item.symbol].name}`,
       color: colors[index % colors.length],
     })),
@@ -1887,8 +1917,23 @@ async function renderDcaEngine() {
     return;
   }
   $("#dcaResults").innerHTML = rows
-    .sort((a, b) => (Number.isFinite(b.annualized) ? b.annualized : b.rate) - (Number.isFinite(a.annualized) ? a.annualized : a.rate))
-    .map(({ symbol, last, rate, annualized, installments }) => {
+    .sort((a, b) => {
+      if (!a.last.invested && b.last.invested) return 1;
+      if (a.last.invested && !b.last.invested) return -1;
+      return (Number.isFinite(b.annualized) ? b.annualized : b.rate) - (Number.isFinite(a.annualized) ? a.annualized : a.rate);
+    })
+    .map(({ symbol, last, rate, annualized, installments, error }) => {
+      if (!last.invested) {
+        return `
+          <div class="rank-row">
+            <div>
+              <strong>${symbol} ${stocks[symbol].name}</strong>
+              <small>${error || "沒有可用歷史日線"}</small>
+            </div>
+            <strong>--</strong>
+          </div>
+        `;
+      }
       return `
         <div class="rank-row">
           <div>
