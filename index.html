@@ -272,9 +272,9 @@
               <select id="rankingPeriod">
                 <option value="today" selected>今日</option>
                 <option value="1d">1日</option>
-                <option value="1w">1週</option>
-                <option value="1m">1月</option>
-                <option value="1y">1年</option>
+                <option value="1w" disabled>1週（需歷史資料）</option>
+                <option value="1m" disabled>1月（需歷史資料）</option>
+                <option value="1y" disabled>1年（需歷史資料）</option>
               </select>
               <label for="sectorFilter">類股</label>
               <select id="sectorFilter"></select>
@@ -287,7 +287,7 @@
                 <tr>
                   <th>排名</th>
                   <th>股票</th>
-                  <th>區間漲幅</th>
+                  <th id="rankingReturnHeader">今日漲幅</th>
                   <th>成交量</th>
                   <th>市值</th>
                   <th>強勢持續分數</th>

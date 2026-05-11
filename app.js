@@ -717,6 +717,12 @@ function periodReturn(symbol, period = "1y") {
   return periodReturnDetail(symbol, period).returnRate;
 }
 
+const liveRankingPeriods = new Set(["today", "1d"]);
+
+function normalizeRankingPeriod() {
+  if (!liveRankingPeriods.has(state.rankingPeriod)) state.rankingPeriod = "today";
+}
+
 function allPeriodReturns(symbol) {
   return ["1d", "1w", "1m", "1y"].map((period) => periodReturn(symbol, period));
 }
@@ -1064,6 +1070,7 @@ function renderDcaList() {
 
 function renderControls() {
   syncSelections();
+  normalizeRankingPeriod();
   const sortedEntries = Object.entries(stocks).sort((a, b) => (b[1].marketCap || 0) - (a[1].marketCap || 0));
   const list = visibleSymbols();
   const options = optionHtml(list);
@@ -1090,6 +1097,7 @@ function renderControls() {
   $("#comparePeriod").value = state.comparePeriod;
   $("#compareStartDate").value = state.compareStartDate;
   $("#compareEndDate").value = state.compareEndDate;
+  $("#rankingPeriod").value = state.rankingPeriod;
   $("#dcaStartDate").value = state.dcaStartDate;
   $("#dcaEndDate").value = state.dcaEndDate;
 
@@ -1335,21 +1343,21 @@ function renderDcaEngine() {
 }
 
 function renderMarketRanking() {
-  const isFullMarket = state.rankingPeriod === "today" || state.rankingPeriod === "1d";
-  const sourceSymbols = isFullMarket ? Object.keys(stocks).filter(isTaiwanRankingSymbol) : visibleSymbols().filter(isTaiwanRankingSymbol);
+  normalizeRankingPeriod();
+  $("#rankingPeriod").value = state.rankingPeriod;
+  $("#rankingReturnHeader").textContent = state.rankingPeriod === "1d" ? "1日漲幅" : "今日漲幅";
+  const sourceSymbols = Object.keys(stocks).filter(isTaiwanRankingSymbol);
   const sectors = ["全部", ...new Set(sourceSymbols.map((symbol) => stocks[symbol].sector).filter(Boolean))];
   $("#sectorFilter").innerHTML = sectors.map((sector) => `<option value="${sector}">${sector}</option>`).join("");
   if (!sectors.includes(state.sector)) state.sector = "全部";
   $("#sectorFilter").value = state.sector;
-  $("#rankingNote").textContent = isFullMarket
-    ? "今日排行使用證交所與櫃買中心每日全市場收盤資料，含上市櫃普通股、ETF / ETN。"
-    : "週 / 月 / 年目前使用你的台股清單比較；全市場歷史排行需要每日歷史資料庫。";
+  $("#rankingNote").textContent = "目前排行榜只顯示證交所與櫃買中心每日真實行情漲跌幅；1週 / 1月 / 1年需接上每日 price_history 後才會開啟，避免顯示錯誤漲幅。";
 
   const rows = sourceSymbols
     .filter((symbol) => state.sector === "全部" || stocks[symbol].sector === state.sector)
     .map((symbol) => ({
       symbol,
-      returnRate: periodReturn(symbol, state.rankingPeriod),
+      returnRate: stocks[symbol].dailyReturn || 0,
       score: continuityScore(symbol),
       marketCap: stocks[symbol].marketCap || 0,
     }))
@@ -1580,7 +1588,8 @@ function bindEvents() {
   });
 
   $("#rankingPeriod").addEventListener("change", (event) => {
-    state.rankingPeriod = event.target.value;
+    state.rankingPeriod = liveRankingPeriods.has(event.target.value) ? event.target.value : "today";
+    event.target.value = state.rankingPeriod;
     saveUserState();
     renderMarketRanking();
   });
