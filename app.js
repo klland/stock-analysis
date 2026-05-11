@@ -122,11 +122,16 @@ const state = {
 const TWSE_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL";
 const TWSE_COMPANY_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L";
 const TPEX_DAILY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=EW&o=data";
+const TWSE_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX";
+const TPEX_HISTORY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php";
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
+const HISTORY_CLOSE_CACHE_KEY = "decision-ledger-history-close-cache-v1";
+const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-adjusted-close-cache-v1";
 let marketHistoryPeriods = {};
 const USER_STATE_KEY = "decision-ledger-user-state-v1";
 const usEtfSymbols = new Set(["SPY", "QQQ", "VOO", "VTI", "IVV", "SCHD", "VGT", "XLK", "SMH", "SOXX", "DIA", "IWM", "TLT", "BND", "AGG", "IBIT"]);
 let userStateLoaded = false;
+let singleTradeRenderToken = 0;
 
 const sectorNames = {
   "01": "水泥",
@@ -195,6 +200,21 @@ function rocDateToIso(value) {
   if (text.length !== 7) return "";
   const year = Number(text.slice(0, 3)) + 1911;
   return `${year}-${text.slice(3, 5)}-${text.slice(5, 7)}`;
+}
+
+function addDaysIso(isoDate, days) {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function isoToTwseDate(isoDate) {
+  return isoDate.replaceAll("-", "");
+}
+
+function isoToTpexRocDate(isoDate) {
+  const [year, month, day] = isoDate.split("-");
+  return `${Number(year) - 1911}/${month}/${day}`;
 }
 
 function formatMarketCap(value) {
@@ -372,6 +392,40 @@ function writeCache(payload) {
   }
 }
 
+function readHistoryCloseCache() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_CLOSE_CACHE_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeHistoryCloseCache(cache) {
+  try {
+    const entries = Object.entries(cache).sort(([a], [b]) => b.localeCompare(a)).slice(0, 40);
+    localStorage.setItem(HISTORY_CLOSE_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // localStorage may be disabled in some file:// contexts.
+  }
+}
+
+function readAdjustedCloseCache() {
+  try {
+    return JSON.parse(localStorage.getItem(ADJUSTED_CLOSE_CACHE_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAdjustedCloseCache(cache) {
+  try {
+    const entries = Object.entries(cache).slice(-200);
+    localStorage.setItem(ADJUSTED_CLOSE_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // localStorage may be disabled in some file:// contexts.
+  }
+}
+
 function anchoredPriceSeries(symbol, close, fallbackPrices) {
   const existing = stocks[symbol]?.prices;
   if (!existing?.length) return fallbackPrices.slice(-priceDates.length);
@@ -416,6 +470,116 @@ function parseCsv(text) {
   }
   const headers = rows.shift() || [];
   return rows.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] || ""])));
+}
+
+function parseTwseHistory(json) {
+  const table = json?.tables?.find((item) => item.fields?.includes("證券代號") && item.fields?.includes("收盤價"));
+  if (!table?.data?.length) return {};
+  const codeIndex = table.fields.indexOf("證券代號");
+  const closeIndex = table.fields.indexOf("收盤價");
+  return Object.fromEntries(
+    table.data
+      .map((row) => [String(row[codeIndex] || "").trim(), toNumber(row[closeIndex])])
+      .filter(([symbol, close]) => symbol && close > 0),
+  );
+}
+
+function parseTpexHistory(json) {
+  const table = json?.tables?.[0];
+  if (!table?.data?.length) return {};
+  const codeIndex = table.fields.findIndex((field) => field.trim() === "代號");
+  const closeIndex = table.fields.findIndex((field) => field.trim() === "收盤");
+  if (codeIndex === -1 || closeIndex === -1) return {};
+  return Object.fromEntries(
+    table.data
+      .map((row) => [String(row[codeIndex] || "").trim(), toNumber(row[closeIndex])])
+      .filter(([symbol, close]) => symbol && close > 0),
+  );
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+  return response.json();
+}
+
+async function fetchTwseHistory(date) {
+  const params = new URLSearchParams({ date: isoToTwseDate(date), type: "ALLBUT0999", response: "json" });
+  return parseTwseHistory(await fetchJson(`${TWSE_HISTORY_URL}?${params}`));
+}
+
+async function fetchTpexHistory(date) {
+  const params = new URLSearchParams({ l: "zh-tw", d: isoToTpexRocDate(date), se: "EW", o: "json" });
+  return parseTpexHistory(await fetchJson(`${TPEX_HISTORY_URL}?${params}`));
+}
+
+async function historicalCloseSnapshotOnOrBefore(targetDate) {
+  const cache = readHistoryCloseCache();
+  for (let offset = 0; offset <= 14; offset += 1) {
+    const date = addDaysIso(targetDate, -offset);
+    if (cache[date]?.closes) return cache[date];
+
+    const [twseResult, tpexResult] = await Promise.allSettled([fetchTwseHistory(date), fetchTpexHistory(date)]);
+    const twse = twseResult.status === "fulfilled" ? twseResult.value : {};
+    const tpex = tpexResult.status === "fulfilled" ? tpexResult.value : {};
+    const closes = { ...twse, ...tpex };
+    if (Object.keys(closes).length > 100) {
+      const snapshot = { date, closes, fetchedAt: new Date().toISOString() };
+      cache[date] = snapshot;
+      writeHistoryCloseCache(cache);
+      return snapshot;
+    }
+  }
+  return null;
+}
+
+function taiwanDateFromTimestamp(timestamp) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(timestamp * 1000));
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function yahooSymbolFor(symbol) {
+  if (stocks[symbol]?.market === "US") return symbol.replace("_", "-");
+  if (!isTaiwanSymbol(symbol)) return "";
+  return `${symbol}.${stocks[symbol]?.market === "TPEX" ? "TWO" : "TW"}`;
+}
+
+async function adjustedCloseOnOrBefore(symbol, targetDate) {
+  const yahooSymbol = yahooSymbolFor(symbol);
+  if (!yahooSymbol) return null;
+
+  const cache = readAdjustedCloseCache();
+  const cacheKey = `${symbol}:${targetDate}`;
+  if (cache[cacheKey]) return cache[cacheKey];
+
+  const start = Math.floor(new Date(`${addDaysIso(targetDate, -7)}T00:00:00Z`).getTime() / 1000);
+  const end = Math.floor(new Date(`${addDaysIso(targetDate, 2)}T00:00:00Z`).getTime() / 1000);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?period1=${start}&period2=${end}&interval=1d&events=history%7Cdiv%7Csplit`;
+  const result = await fetchJson(url);
+  const chart = result?.chart?.result?.[0];
+  const timestamps = chart?.timestamp || [];
+  const adjusted = chart?.indicators?.adjclose?.[0]?.adjclose || [];
+  const closes = chart?.indicators?.quote?.[0]?.close || [];
+  const points = timestamps
+    .map((timestamp, index) => ({
+      date: taiwanDateFromTimestamp(timestamp),
+      value: toNumber(adjusted[index]) || toNumber(closes[index]),
+    }))
+    .filter((point) => point.date <= targetDate && point.value > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const point = points.at(-1) || null;
+  if (point) {
+    cache[cacheKey] = { ...point, source: "adjusted" };
+    writeAdjustedCloseCache(cache);
+    return cache[cacheKey];
+  }
+  return null;
 }
 
 function latestTradingDate() {
@@ -803,6 +967,51 @@ function currentValueFor(trade, symbol = trade.symbol) {
 function returnFor(trade, symbol = trade.symbol) {
   const invested = investedAmountFor(trade);
   return invested ? currentValueFor(trade, symbol) / invested - 1 : 0;
+}
+
+function hypotheticalTradeResult(trade, symbol, entryPoint) {
+  const invested = investedAmountFor(trade);
+  const entryPrice = toNumber(entryPoint?.value);
+  if (!(invested > 0) || !(entryPrice > 0)) {
+    return { symbol, entryPrice: 0, value: 0, returnRate: null, available: false };
+  }
+  const shares = invested / entryPrice;
+  const value = shares * latestPrice(symbol);
+  return {
+    symbol,
+    entryPrice,
+    entryDate: entryPoint.date,
+    entrySource: entryPoint.source,
+    value,
+    returnRate: invested ? value / invested - 1 : null,
+    available: true,
+  };
+}
+
+function actualTradeResult(trade) {
+  const invested = investedAmountFor(trade);
+  const entryPrice = entryPriceForTrade(trade);
+  const value = currentValueFor(trade);
+  return {
+    symbol: trade.symbol,
+    entryPrice,
+    entryDate: trade.date,
+    entrySource: "actual",
+    value,
+    returnRate: invested ? value / invested - 1 : null,
+    available: true,
+  };
+}
+
+async function entryPointForHypothetical(symbol, targetDate, snapshot) {
+  try {
+    const adjusted = await adjustedCloseOnOrBefore(symbol, targetDate);
+    if (adjusted?.value > 0) return adjusted;
+  } catch (error) {
+    console.warn(`Adjusted close unavailable for ${symbol}: ${error.message}`);
+  }
+  const raw = toNumber(snapshot?.closes?.[symbol]);
+  return raw > 0 ? { date: snapshot.date, value: raw, source: "raw" } : null;
 }
 
 function classForReturn(value) {
@@ -1317,24 +1526,53 @@ function renderTrades() {
     .join("");
 }
 
-function renderSingleTradeAnalysis() {
+async function renderSingleTradeAnalysis() {
+  const token = ++singleTradeRenderToken;
   const trade = trades.find((item) => item.id === state.selectedTradeId);
   if (!trade) {
     $("#singleTradeAnalysis").innerHTML = "<p>請先新增一筆交易。</p>";
     return;
   }
 
-  $("#singleTradeAnalysis").innerHTML = visibleSymbols()
-    .map((symbol) => ({ symbol, value: currentValueFor(trade, symbol), returnRate: returnFor(trade, symbol) }))
+  $("#singleTradeAnalysis").innerHTML = `<p>正在抓取 ${trade.date} 的官方收盤價，用同一天每檔股票價格重算...</p>`;
+
+  let snapshot;
+  try {
+    snapshot = await historicalCloseSnapshotOnOrBefore(trade.date);
+  } catch (error) {
+    console.warn(error);
+  }
+  if (token !== singleTradeRenderToken) return;
+
+  if (!snapshot) {
+    $("#singleTradeAnalysis").innerHTML = `<p>無法取得 ${trade.date} 或前 14 天內的官方收盤價，先不產生假設買入結果，避免顯示錯誤報酬。</p>`;
+    return;
+  }
+
+  const invested = investedAmountFor(trade);
+  const symbols = visibleSymbols();
+  const entryPoints = Object.fromEntries(
+    await Promise.all(
+      symbols.map(async (symbol) => [symbol, symbol === trade.symbol ? null : await entryPointForHypothetical(symbol, trade.date, snapshot)]),
+    ),
+  );
+  if (token !== singleTradeRenderToken) return;
+
+  $("#singleTradeAnalysis").innerHTML = symbols
+    .map((symbol) => (symbol === trade.symbol ? actualTradeResult(trade) : hypotheticalTradeResult(trade, symbol, entryPoints[symbol])))
+    .filter((item) => item.available)
     .sort((a, b) => b.returnRate - a.returnRate)
     .map((item) => {
       const isReal = item.symbol === trade.symbol ? "真實買入" : "假設買入";
-      const invested = investedAmountFor(trade);
+      const basis =
+        item.symbol === trade.symbol
+          ? `你的買入價 ${item.entryPrice.toFixed(2)}`
+          : `${item.entryDate} ${item.entrySource === "adjusted" ? "還原收盤" : "原始收盤"} ${item.entryPrice.toFixed(2)}`;
       return `
         <div class="analysis-card">
           <span>${isReal}</span>
           <strong>${item.symbol} ${stocks[item.symbol].name}</strong>
-          <small>${currency.format(invested)} 到 ${currency.format(item.value)}</small>
+          <small>${basis}，${currency.format(invested)} 到 ${currency.format(item.value)}</small>
           <b class="${classForReturn(item.returnRate)}">${percent.format(item.returnRate)}</b>
         </div>
       `;
