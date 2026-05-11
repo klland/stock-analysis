@@ -129,6 +129,8 @@ const HISTORY_CLOSE_CACHE_KEY = "decision-ledger-history-close-cache-v1";
 const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-adjusted-close-cache-v1";
 const ADJUSTED_HISTORY_CACHE_KEY = "decision-ledger-adjusted-history-cache-v1";
 let marketHistoryPeriods = {};
+let marketDcaSnapshots = {};
+let marketDcaSeries = {};
 const USER_STATE_KEY = "decision-ledger-user-state-v1";
 const usEtfSymbols = new Set(["SPY", "QQQ", "VOO", "VTI", "IVV", "SCHD", "VGT", "XLK", "SMH", "SOXX", "DIA", "IWM", "TLT", "BND", "AGG", "IBIT"]);
 let userStateLoaded = false;
@@ -540,7 +542,7 @@ async function fetchTpexHistory(date) {
 }
 
 async function historicalCloseSnapshotOnOrBefore(targetDate) {
-  const bundledSnapshot = Object.values(marketHistoryPeriods)
+  const bundledSnapshot = Object.values({ ...marketHistoryPeriods, ...marketDcaSnapshots })
     .filter((snapshot) => snapshot?.date && snapshot.date <= targetDate && snapshot.date >= addDaysIso(targetDate, -14) && snapshot.closes)
     .sort((a, b) => b.date.localeCompare(a.date))[0];
   if (bundledSnapshot) return bundledSnapshot;
@@ -653,6 +655,20 @@ function pricePointOnOrBefore(points, date) {
   return points[0] || null;
 }
 
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 function latestTradingDate() {
   const date = new Date();
   date.setHours(date.getHours() - 18);
@@ -686,6 +702,8 @@ async function fetchMarketData() {
 function applyTwseMarketData(payload) {
   const companyMap = new Map(payload.companies.map((item) => [item["公司代號"], item]));
   marketHistoryPeriods = payload.history?.periods || {};
+  marketDcaSnapshots = payload.history?.dcaMonthly || {};
+  marketDcaSeries = payload.history?.dcaSeries || {};
   let added = 0;
 
   payload.daily.forEach((row) => {
@@ -1280,9 +1298,55 @@ function buildDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStart
   });
 }
 
-async function buildRealDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStartDate, endDate = state.dcaEndDate) {
+function buildDcaSeriesFromPricePoints(symbol, points, startDate, endDate) {
+  const usablePoints = points
+    .filter((point) => point.date >= addDaysIso(startDate, -14) && point.date <= endDate && point.value > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (usablePoints.length === 0) {
+    return { symbol, series: [], cashflows: [], installments: [], error: "這個日期區間沒有可用日線" };
+  }
+
   const schedule = buildDcaInstallments(startDate, endDate, state.dcaFrequency);
-  const snapshotRequests = await dcaSnapshotRequests(schedule, endDate);
+  const installments = schedule
+    .map((scheduledDate) => {
+      const point = pricePointOnOrBefore(usablePoints, scheduledDate);
+      return point?.value > 0 ? { scheduledDate, date: point.date, price: point.value } : null;
+    })
+    .filter((item) => item && item.date <= endDate)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const finalPoint = pricePointOnOrBefore(usablePoints, endDate);
+  if (installments.length === 0 || !finalPoint?.value) {
+    return { symbol, series: [], cashflows: [], installments: [], error: "投入日或結束日沒有可用價格" };
+  }
+
+  let invested = 0;
+  let shares = 0;
+  let installmentIndex = 0;
+  const cashflows = [];
+  const valuationPoints = usablePoints.filter((point) => point.date >= installments[0].date && point.date <= finalPoint.date);
+  const series = valuationPoints
+    .map((point) => {
+      while (installmentIndex < installments.length && installments[installmentIndex].date <= point.date) {
+        const installment = installments[installmentIndex];
+        invested += state.dcaAmount;
+        shares += state.dcaAmount / installment.price;
+        cashflows.push({ date: installment.date, amount: -state.dcaAmount });
+        installmentIndex += 1;
+      }
+      return {
+        date: point.date,
+        invested,
+        value: shares * point.value,
+      };
+    })
+    .filter((point) => point.invested > 0);
+
+  const last = series.at(-1);
+  if (last) cashflows.push({ date: last.date, amount: last.value });
+  return { symbol, series, cashflows, installments, error: series.length ? "" : "日期區間沒有產生估值點" };
+}
+
+function buildDcaSeriesFromSnapshots(symbol, snapshotRequests, endDate) {
   if (snapshotRequests.length === 0) return { symbol, series: [], cashflows: [], installments: [], error: "沒有可用官方收盤資料" };
 
   const installments = snapshotRequests
@@ -1322,22 +1386,36 @@ async function buildRealDcaSeries(symbol = state.dcaSymbols[0], startDate = stat
   return { symbol, series, cashflows, installments, error: series.length ? "" : "日期區間沒有可用價格" };
 }
 
+async function buildRealDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStartDate, endDate = state.dcaEndDate) {
+  const bundledPoints = marketDcaSeries[symbol]?.points || [];
+  if (bundledPoints.length) {
+    const result = buildDcaSeriesFromPricePoints(symbol, bundledPoints, startDate, endDate);
+    if (result.series.length) return result;
+  }
+
+  try {
+    const points = await adjustedHistoryFor(symbol, startDate, endDate);
+    const result = buildDcaSeriesFromPricePoints(symbol, points, startDate, endDate);
+    if (result.series.length) return result;
+    return { ...result, error: result.error || "日線資料不足" };
+  } catch (error) {
+    return { symbol, series: [], cashflows: [], installments: [], error: "歷史日線抓取失敗" };
+  }
+}
+
 async function dcaSnapshotRequests(schedule, endDate) {
   const requests = [
     ...schedule.map((date) => ({ kind: "installment", targetDate: date })),
     { kind: "valuation", targetDate: endDate },
   ].filter((request) => request.targetDate <= endDate);
-  const cache = new Map();
-  const output = [];
-
-  for (const request of requests) {
-    if (!cache.has(request.targetDate)) {
-      cache.set(request.targetDate, await historicalCloseSnapshotOnOrBefore(request.targetDate));
-    }
-    const snapshot = cache.get(request.targetDate);
-    if (snapshot?.closes) output.push({ ...request, snapshot });
-  }
-  return output;
+  const uniqueDates = [...new Set(requests.map((request) => request.targetDate))];
+  const snapshots = new Map();
+  await mapWithConcurrency(uniqueDates, 4, async (date) => {
+    snapshots.set(date, await historicalCloseSnapshotOnOrBefore(date));
+  });
+  return requests
+    .map((request) => ({ ...request, snapshot: snapshots.get(request.targetDate) }))
+    .filter((request) => request.snapshot?.closes);
 }
 
 function dcaValuationPoints(startDate, endDate) {
@@ -1354,14 +1432,16 @@ function dcaValuationPoints(startDate, endDate) {
 
 function buildDcaInstallments(startDate, endDate, frequency) {
   const dates = [];
-  const current = new Date(`${startDate}T00:00:00`);
-  const end = new Date(`${endDate}T00:00:00`);
+  const [startYear, startMonth, startDay] = startDate.split("-").map(Number);
+  const [endYear, endMonth, endDay] = endDate.split("-").map(Number);
+  const current = new Date(Date.UTC(startYear, startMonth - 1, startDay));
+  const end = new Date(Date.UTC(endYear, endMonth - 1, endDay));
   while (current <= end) {
     dates.push(current.toISOString().slice(0, 10));
     if (frequency === "weekly") {
-      current.setDate(current.getDate() + 7);
+      current.setUTCDate(current.getUTCDate() + 7);
     } else {
-      current.setMonth(current.getMonth() + 1);
+      current.setUTCMonth(current.getUTCMonth() + 1);
     }
   }
   return dates;
@@ -1865,9 +1945,10 @@ async function renderDcaEngine() {
     return;
   }
 
-  const scheduledCount = buildDcaInstallments(state.dcaStartDate, state.dcaEndDate, state.dcaFrequency).length;
+  const schedule = buildDcaInstallments(state.dcaStartDate, state.dcaEndDate, state.dcaFrequency);
+  const scheduledCount = schedule.length;
   $("#dcaBasis").textContent =
-    `正在取得 ${state.dcaStartDate} 到 ${state.dcaEndDate} 的官方收盤價快照，依每期投入金額計算股數與 XIRR 年化...`;
+    `正在取得 ${state.dcaStartDate} 到 ${state.dcaEndDate} 的還原日線，依每期投入金額計算股數與 XIRR 年化...`;
   $("#dcaInvested").textContent = "--";
   $("#dcaValue").textContent = "--";
   $("#dcaReturn").textContent = "--";
@@ -1876,17 +1957,26 @@ async function renderDcaEngine() {
   $("#dcaLegend").innerHTML = "";
   $("#dcaResults").innerHTML = "";
 
-  const seriesBySymbol = [];
-  for (const symbol of state.dcaSymbols) {
-    seriesBySymbol.push(await buildRealDcaSeries(symbol));
-    if (token !== dcaRenderToken) return;
-  }
+  let seriesBySymbol = await mapWithConcurrency(state.dcaSymbols, 4, (symbol) =>
+    buildRealDcaSeries(symbol, state.dcaStartDate, state.dcaEndDate),
+  );
   if (token !== dcaRenderToken) return;
+
+  const missingSymbols = seriesBySymbol.filter((item) => !item.series.length && isTaiwanSymbol(item.symbol)).map((item) => item.symbol);
+  if (missingSymbols.length) {
+    $("#dcaBasis").textContent =
+      `部分標的日線不足，正在一次補抓 ${state.dcaStartDate} 到 ${state.dcaEndDate} 的投入日官方快照...`;
+    const snapshotRequests = await dcaSnapshotRequests(schedule, state.dcaEndDate);
+    if (token !== dcaRenderToken) return;
+    seriesBySymbol = seriesBySymbol.map((item) =>
+      item.series.length ? item : buildDcaSeriesFromSnapshots(item.symbol, snapshotRequests, state.dcaEndDate),
+    );
+  }
 
   $("#dcaBasis").textContent =
     `計算基準：${state.dcaFrequency === "weekly" ? "每週" : "每月"}從開始日投入一次，` +
     `每期 ${currency.format(state.dcaAmount)}，共 ${scheduledCount} 期。` +
-    "排定日若非交易日，使用往前最近交易日官方收盤價買入；總報酬 = 總資產 / 累積投入 - 1，年化 = 每期現金流 XIRR。";
+    "排定日若非交易日，使用往前最近交易日還原收盤價買入；總報酬 = 總資產 / 累積投入 - 1，年化 = 每期現金流 XIRR。";
   const rows = seriesBySymbol.map(({ symbol, series }) => {
     const last = series.at(-1) || { invested: 0, value: 0 };
     const rate = last.invested ? last.value / last.invested - 1 : 0;

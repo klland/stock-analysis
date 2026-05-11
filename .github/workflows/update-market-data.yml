@@ -57,7 +57,23 @@ jobs:
             console.error(`Missing historical snapshots: ${missingHistory.join(', ')}`);
             process.exit(1);
           }
-          console.log(`Market data date ${d.date}; TWSE ${d.daily.length}, TPEx ${d.tpexDaily.length}, companies ${d.companies.length}, US ${d.usDaily.length}, history ${historyPeriods.join('/')}.`);"
+          const requiredHistorySymbols = ['2330', '0050', '2454'];
+          const missingHistorySymbols = historyPeriods.flatMap((period) =>
+            requiredHistorySymbols
+              .filter((symbol) => !d.history.periods[period].closes?.[symbol])
+              .map((symbol) => `${period}:${symbol}`)
+          );
+          if (missingHistorySymbols.length) {
+            console.error(`Missing TWSE history symbols: ${missingHistorySymbols.join(', ')}`);
+            process.exit(1);
+          }
+          const requiredDcaSeries = ['0050', '006208', '00735', '00981A', '2308', '2317', '2330', '2454', 'AAPL', 'SPY'];
+          const missingDcaSeries = requiredDcaSeries.filter((symbol) => (d.history?.dcaSeries?.[symbol]?.points || []).length < 120);
+          if (missingDcaSeries.length) {
+            console.error(`Missing DCA daily series: ${missingDcaSeries.join(', ')}`);
+            process.exit(1);
+          }
+          console.log(`Market data date ${d.date}; TWSE ${d.daily.length}, TPEx ${d.tpexDaily.length}, companies ${d.companies.length}, US ${d.usDaily.length}, history ${historyPeriods.join('/')}, DCA series ${Object.keys(d.history?.dcaSeries || {}).length}.`);"
 
       - name: Commit refreshed data
         run: |

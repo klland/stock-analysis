@@ -85,6 +85,26 @@ const usSymbols = {
   IBIT: "iShares Bitcoin Trust",
 };
 
+const requiredHistorySymbols = ["2330", "0050", "2454"];
+const dcaSeriesSymbols = [
+  "0050",
+  "006208",
+  "00631L",
+  "00735",
+  "00981A",
+  "2303",
+  "2308",
+  "2317",
+  "2330",
+  "2454",
+  "2881",
+  "AAPL",
+  "MSFT",
+  "NVDA",
+  "SPY",
+  "QQQ",
+];
+
 async function getJson(url) {
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
@@ -212,15 +232,17 @@ async function getHistorySnapshot(period, targetDate) {
     const twse = twseResult.status === "fulfilled" ? twseResult.value : {};
     const tpex = tpexResult.status === "fulfilled" ? tpexResult.value : {};
     const closes = { ...twse, ...tpex };
+    const twseCount = Object.keys(twse).length;
+    const tpexCount = Object.keys(tpex).length;
     const count = Object.keys(closes).length;
-    if (count > 100) {
+    if (twseCount > 100 && count > 100) {
       return {
         period,
         targetDate,
         date,
         closes,
-        twseCount: Object.keys(twse).length,
-        tpexCount: Object.keys(tpex).length,
+        twseCount,
+        tpexCount,
       };
     }
   }
@@ -238,7 +260,95 @@ async function getHistorySnapshots(latestDate) {
   for (const [period, days] of lookbacks) {
     periods[period] = await getHistorySnapshot(period, addDaysIso(latestDate, -days));
   }
-  return { latestDate, periods };
+  assertPeriodSnapshots(periods);
+  const dcaSeries = await getDcaSymbolHistories(latestDate);
+  return { latestDate, periods, dcaSeries };
+}
+
+function addMonthsIso(isoDate, months) {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCMonth(date.getUTCMonth() + months);
+  return date.toISOString().slice(0, 10);
+}
+
+function assertHistoryPayload(history) {
+  const periods = ["1w", "1m", "1y"];
+  const missingPeriodSymbols = missingPeriodSnapshotSymbols(history.periods || {}, periods);
+  const missingDcaSeries = dcaSeriesSymbols.filter((symbol) => (history.dcaSeries?.[symbol]?.points || []).length < 120);
+  if (missingPeriodSymbols.length || missingDcaSeries.length) {
+    throw new Error(
+      [
+        missingPeriodSymbols.length ? `missing period symbols ${missingPeriodSymbols.slice(0, 12).join(", ")}` : "",
+        missingDcaSeries.length ? `missing DCA series ${missingDcaSeries.slice(0, 12).join(", ")}` : "",
+      ]
+        .filter(Boolean)
+        .join("; "),
+    );
+  }
+}
+
+function missingPeriodSnapshotSymbols(periods, periodNames = Object.keys(periods)) {
+  return periodNames.flatMap((period) =>
+    requiredHistorySymbols
+      .filter((symbol) => !periods?.[period]?.closes?.[symbol])
+      .map((symbol) => `${period}:${symbol}`),
+  );
+}
+
+function assertPeriodSnapshots(periods) {
+  const missing = missingPeriodSnapshotSymbols(periods, ["1w", "1m", "1y"]);
+  if (missing.length) throw new Error(`missing period symbols ${missing.slice(0, 12).join(", ")}`);
+}
+
+function taiwanDateFromTimestamp(timestamp) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(timestamp * 1000));
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function yahooSymbolFor(symbol) {
+  if (usSymbols[symbol]) return symbol.replace("_", "-");
+  return `${symbol}.TW`;
+}
+
+async function getYahooHistory(symbol, startDate, endDate) {
+  const start = Math.floor(new Date(`${addDaysIso(startDate, -14)}T00:00:00Z`).getTime() / 1000);
+  const end = Math.floor(new Date(`${addDaysIso(endDate, 3)}T00:00:00Z`).getTime() / 1000);
+  const yahooSymbol = yahooSymbolFor(symbol);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?period1=${start}&period2=${end}&interval=1d&events=history%7Cdiv%7Csplit`;
+  const result = await getJson(url);
+  const chart = result?.chart?.result?.[0];
+  const timestamps = chart?.timestamp || [];
+  const adjusted = chart?.indicators?.adjclose?.[0]?.adjclose || [];
+  const closes = chart?.indicators?.quote?.[0]?.close || [];
+  return timestamps
+    .map((timestamp, index) => ({
+      date: taiwanDateFromTimestamp(timestamp),
+      value: toNumber(adjusted[index]) || toNumber(closes[index]),
+    }))
+    .filter((point) => point.date >= addDaysIso(startDate, -14) && point.date <= addDaysIso(endDate, 3) && point.value > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function getDcaSymbolHistories(latestDate) {
+  const startDate = addMonthsIso(latestDate.slice(0, 7) + "-01", -36);
+  const histories = {};
+  for (const symbol of dcaSeriesSymbols) {
+    try {
+      const points = await getYahooHistory(symbol, startDate, latestDate);
+      if (points.length) histories[symbol] = { symbol, startDate, endDate: latestDate, points };
+    } catch (error) {
+      console.warn(`No DCA series for ${symbol}: ${error.message}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 160));
+  }
+  return histories;
 }
 
 async function getUsQuote(symbol) {
@@ -281,6 +391,7 @@ const [daily, companies, tpexCsv, usDaily] = await Promise.all([
 const tpexDaily = parseCsv(tpexCsv);
 const latestDate = rocDateToIso(daily?.[0]?.Date || "");
 const history = latestDate ? await getHistorySnapshots(latestDate) : { latestDate: "", periods: {} };
+if (latestDate) assertHistoryPayload(history);
 const payload = {
   daily,
   companies,
@@ -300,5 +411,5 @@ await writeFile(
 );
 
 console.log(
-  `Wrote ${outFile} with ${daily.length} TWSE rows, ${tpexDaily.length} TPEx rows, ${companies.length} company rows, ${payload.usDaily.length} US rows, and ${Object.keys(history.periods).length} history snapshots.`,
+  `Wrote ${outFile} with ${daily.length} TWSE rows, ${tpexDaily.length} TPEx rows, ${companies.length} company rows, ${payload.usDaily.length} US rows, ${Object.keys(history.periods).length} history snapshots, and ${Object.keys(history.dcaSeries || {}).length} DCA daily series.`,
 );
