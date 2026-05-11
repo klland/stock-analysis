@@ -650,6 +650,30 @@ function priceOnOrAfter(symbol, date) {
   return stocks[symbol].prices[safeIndex];
 }
 
+function previousClose(symbol) {
+  const stock = stocks[symbol];
+  const dailyReturn = stock?.dailyReturn;
+  const latest = latestPrice(symbol);
+  if (!stock?.live || !Number.isFinite(dailyReturn) || dailyReturn <= -1) return 0;
+  return latest / (1 + dailyReturn);
+}
+
+function priceOnOrBefore(symbol, date) {
+  if (stocks[symbol]?.live && state.marketDataDate && date < state.marketDataDate) {
+    const lastKnownHistoricalDate = priceDates.at(-2);
+    if (!lastKnownHistoricalDate || date >= lastKnownHistoricalDate) {
+      const previous = previousClose(symbol);
+      if (previous > 0) return previous;
+    }
+  }
+  return priceAtIndex(symbol, dateIndexOnOrBefore(date));
+}
+
+function entryPriceForTrade(trade, symbol = trade.symbol) {
+  if (symbol === trade.symbol && Number.isFinite(Number(trade.price))) return Number(trade.price);
+  return priceOnOrBefore(symbol, trade.date);
+}
+
 function priceAtIndex(symbol, index) {
   return stocks[symbol].prices[Math.max(0, Math.min(index, priceDates.length - 1))];
 }
@@ -768,7 +792,7 @@ function allPeriodReturns(symbol) {
 
 function sharesFor(trade, symbol = trade.symbol) {
   if (symbol === trade.symbol && Number.isFinite(Number(trade.shares))) return Number(trade.shares);
-  const entryPrice = symbol === trade.symbol && trade.price ? trade.price : priceOnOrAfter(symbol, trade.date);
+  const entryPrice = entryPriceForTrade(trade, symbol);
   return trade.amount / entryPrice;
 }
 
@@ -782,6 +806,7 @@ function returnFor(trade, symbol = trade.symbol) {
 }
 
 function classForReturn(value) {
+  if (!Number.isFinite(value)) return "";
   return value >= 0 ? "return-positive" : "return-negative";
 }
 
@@ -836,9 +861,54 @@ function sharpeRatio(series) {
   return vol === 0 ? 0 : avg / vol;
 }
 
+function snapshotPricePoints(symbol) {
+  const points = Object.values(marketHistoryPeriods)
+    .filter((snapshot) => snapshot?.date && toNumber(snapshot.closes?.[symbol]) > 0)
+    .map((snapshot) => ({ date: snapshot.date, value: toNumber(snapshot.closes[symbol]), source: "history" }));
+  const currentDate = state.marketDataDate || priceDates.at(-1);
+  const current = latestPrice(symbol);
+  if (currentDate && current > 0) points.push({ date: currentDate, value: current, source: "current" });
+
+  return [...new Map(points.sort((a, b) => a.date.localeCompare(b.date)).map((point) => [point.date, point])).values()];
+}
+
+function closeFromSnapshot(symbol, point) {
+  if (point.source === "current") return latestPrice(symbol);
+  return toNumber(point.closes?.[symbol]);
+}
+
+function portfolioSnapshotSeries(symbolMode = "real") {
+  const snapshots = Object.values(marketHistoryPeriods)
+    .filter((snapshot) => snapshot?.date)
+    .map((snapshot) => ({ date: snapshot.date, source: "history", closes: snapshot.closes || {} }));
+  const currentDate = state.marketDataDate || priceDates.at(-1);
+  if (currentDate) snapshots.push({ date: currentDate, source: "current", closes: {} });
+
+  return [...new Map(snapshots.sort((a, b) => a.date.localeCompare(b.date)).map((point) => [point.date, point])).values()]
+    .map((point) => {
+      const value = trades.reduce((sum, trade) => {
+        if (trade.date > point.date) return sum;
+        const symbol = symbolMode === "real" ? trade.symbol : symbolMode;
+        const price = closeFromSnapshot(symbol, point);
+        if (!(price > 0)) return sum;
+        return sum + sharesFor(trade, symbol) * price;
+      }, 0);
+      return { date: point.date, value };
+    })
+    .filter((point) => point.value > 0);
+}
+
+function hasEnoughSeries(series) {
+  return series.length >= 3;
+}
+
+function metricValue(value, formatter = percent) {
+  return Number.isFinite(value) ? formatter.format(value) : "--";
+}
+
 function investedAmountFor(trade) {
   if (Number.isFinite(Number(trade.amount))) return Number(trade.amount);
-  return sharesFor(trade) * (trade.price || priceOnOrAfter(trade.symbol, trade.date));
+  return sharesFor(trade) * entryPriceForTrade(trade);
 }
 
 function summarizePortfolio() {
@@ -941,26 +1011,40 @@ function yearsBetween(startDate, endDate) {
 }
 
 function riskPosition(symbol) {
-  const prices = stocks[symbol].prices;
-  const latest = prices.at(-1);
-  const high = Math.max(...prices);
-  const low = Math.min(...prices);
+  const points = snapshotPricePoints(symbol);
+  const prices = points.map((point) => point.value);
+  const latest = latestPrice(symbol);
+  const highPoint = points.reduce((best, point) => (point.value > best.value ? point : best), points.at(-1));
+  const lowPoint = points.reduce((best, point) => (point.value < best.value ? point : best), points.at(-1));
+  const high = highPoint?.value || latest;
+  const low = lowPoint?.value || latest;
   const sorted = [...prices].sort((a, b) => a - b);
   const belowCount = sorted.filter((price) => price <= latest).length;
-  const percentile = ((belowCount - 1) / (sorted.length - 1)) * 100;
-  const ma200 = prices.slice(-8).reduce((sum, price) => sum + price, 0) / Math.min(8, prices.length);
+  const percentile = sorted.length > 1 ? ((belowCount - 1) / (sorted.length - 1)) * 100 : NaN;
+  const snapshotAverage = prices.reduce((sum, price) => sum + price, 0) / Math.max(1, prices.length);
   const highDistance = latest / high - 1;
   const lowDistance = latest / low - 1;
-  const maDistance = latest / ma200 - 1;
-  const highLowScore = Math.round(Math.max(0, Math.min(100, percentile * 0.65 + (maDistance + 0.2) * 100 * 0.35)));
-  return { latest, high, low, percentile, highDistance, lowDistance, maDistance, highLowScore };
+  const averageDistance = snapshotAverage > 0 ? latest / snapshotAverage - 1 : NaN;
+  const highLowScore = Number.isFinite(percentile) ? Math.round(Math.max(0, Math.min(100, percentile))) : "--";
+  return {
+    latest,
+    high,
+    low,
+    highDate: highPoint?.date || "",
+    lowDate: lowPoint?.date || "",
+    percentile,
+    highDistance,
+    lowDistance,
+    averageDistance,
+    highLowScore,
+    sampleCount: points.length,
+  };
 }
 
 function continuityScore(symbol) {
-  const returns = allPeriodReturns(symbol);
-  return Math.round(
-    returns.reduce((sum, value) => sum + Math.max(0, Math.min(1, value + 0.15)), 0) * 25,
-  );
+  const returns = ["1d", "1w", "1m", "1y"].map((period) => rankingReturn(symbol, period)).filter(Number.isFinite);
+  if (returns.length === 0) return 0;
+  return Math.round(returns.reduce((sum, value) => sum + Math.max(0, Math.min(1, value + 0.15)), 0) * (100 / returns.length));
 }
 
 function drawLineChart(canvas, seriesList, formatter = currency) {
@@ -1212,7 +1296,7 @@ function renderTrades() {
 
   $("#tradeTable").innerHTML = trades
     .map((trade) => {
-      const entryPrice = trade.price || priceOnOrAfter(trade.symbol, trade.date);
+      const entryPrice = entryPriceForTrade(trade);
       const shares = sharesFor(trade);
       const invested = investedAmountFor(trade);
       const value = currentValueFor(trade);
@@ -1440,23 +1524,31 @@ function renderRiskPosition() {
   const stock = stocks[symbol];
   const risk = riskPosition(symbol);
   $("#riskCards").innerHTML = `
-    <div class="analysis-card score-card"><span>高低位分數</span><strong>${risk.highLowScore}</strong><small>0 偏低，100 偏高</small></div>
-    <div class="analysis-card"><span>歷史價格百分位</span><strong>${risk.percentile.toFixed(0)}</strong><small>${symbol} ${stock.name} 最新價 ${risk.latest}</small></div>
-    <div class="analysis-card"><span>距離 52 週高點</span><strong class="${classForReturn(risk.highDistance)}">${percent.format(risk.highDistance)}</strong><small>高點 ${risk.high}</small></div>
-    <div class="analysis-card"><span>距離 52 週低點</span><strong class="${classForReturn(risk.lowDistance)}">${percent.format(risk.lowDistance)}</strong><small>低點 ${risk.low}</small></div>
-    <div class="analysis-card"><span>與 200 日均線距離</span><strong class="${classForReturn(risk.maDistance)}">${percent.format(risk.maDistance)}</strong><small>示範版用 8 期均線近似</small></div>
+    <div class="analysis-card score-card"><span>高低位分數</span><strong>${risk.highLowScore}</strong><small>依 ${risk.sampleCount} 個官方收盤快照估算</small></div>
+    <div class="analysis-card"><span>快照價格百分位</span><strong>${Number.isFinite(risk.percentile) ? risk.percentile.toFixed(0) : "--"}</strong><small>${symbol} ${stock.name} 最新價 ${risk.latest}</small></div>
+    <div class="analysis-card"><span>可用快照高點</span><strong class="${classForReturn(risk.highDistance)}">${metricValue(risk.highDistance)}</strong><small>${risk.highDate || "--"} 高點 ${risk.high}</small></div>
+    <div class="analysis-card"><span>可用快照低點</span><strong class="${classForReturn(risk.lowDistance)}">${metricValue(risk.lowDistance)}</strong><small>${risk.lowDate || "--"} 低點 ${risk.low}</small></div>
+    <div class="analysis-card"><span>與快照均價距離</span><strong class="${classForReturn(risk.averageDistance)}">${metricValue(risk.averageDistance)}</strong><small>200 日均線需每日 price_history</small></div>
   `;
 }
 
 function renderAdvancedMetrics() {
-  const realSeries = buildEquitySeries("real");
-  const benchmarkSeries = buildEquitySeries(state.benchmark);
+  const realSeries = portfolioSnapshotSeries("real");
+  const benchmarkSeries = portfolioSnapshotSeries(state.benchmark);
+  const enoughData = hasEnoughSeries(realSeries);
+  const benchmarkEnough = hasEnoughSeries(benchmarkSeries);
+  const drawdown = enoughData ? maxDrawdown(realSeries) : NaN;
+  const wins = enoughData ? winRate(realSeries) : NaN;
+  const vol = enoughData ? volatility(realSeries) : NaN;
+  const sharpe = enoughData ? sharpeRatio(realSeries) : NaN;
+  const corr = enoughData && benchmarkEnough ? correlation(realSeries, benchmarkSeries) : NaN;
+  const note = enoughData ? `${realSeries.length} 個官方歷史快照估算` : "需至少 3 個歷史快照";
   $("#advancedMetrics").innerHTML = `
-    <div class="analysis-card"><span>最大跌幅 MDD</span><strong class="return-negative">${percent.format(maxDrawdown(realSeries))}</strong><small>真實風險</small></div>
-    <div class="analysis-card"><span>勝率</span><strong>${percent.format(winRate(realSeries))}</strong><small>有多少時間賺錢</small></div>
-    <div class="analysis-card"><span>波動率</span><strong>${percent.format(volatility(realSeries))}</strong><small>穩定度</small></div>
-    <div class="analysis-card"><span>Sharpe Ratio</span><strong>${sharpeRatio(realSeries).toFixed(2)}</strong><small>報酬 / 風險</small></div>
-    <div class="analysis-card"><span>相關性分析</span><strong>${correlation(realSeries, benchmarkSeries).toFixed(2)}</strong><small>和目前比較標的的同步程度</small></div>
+    <div class="analysis-card"><span>最大跌幅 MDD</span><strong class="return-negative">${metricValue(drawdown)}</strong><small>${note}</small></div>
+    <div class="analysis-card"><span>勝率</span><strong>${metricValue(wins)}</strong><small>${note}</small></div>
+    <div class="analysis-card"><span>波動率</span><strong>${metricValue(vol)}</strong><small>快照報酬標準差，非逐日年化</small></div>
+    <div class="analysis-card"><span>Sharpe Ratio</span><strong>${Number.isFinite(sharpe) ? sharpe.toFixed(2) : "--"}</strong><small>需每日資料才適合正式使用</small></div>
+    <div class="analysis-card"><span>相關性分析</span><strong>${Number.isFinite(corr) ? corr.toFixed(2) : "--"}</strong><small>與 ${state.benchmark} 的快照同步程度</small></div>
     <div class="analysis-card"><span>再平衡模擬</span><strong>年度</strong><small>下一階段會加入每年權重重置</small></div>
   `;
 }
