@@ -371,6 +371,16 @@ function writeCache(payload) {
   }
 }
 
+function anchoredPriceSeries(symbol, close, fallbackPrices) {
+  const existing = stocks[symbol]?.prices;
+  if (!existing?.length) return fallbackPrices.slice(-priceDates.length);
+  const anchor = existing.at(-1);
+  if (!Number.isFinite(anchor) || anchor <= 0) return fallbackPrices.slice(-priceDates.length);
+  const scale = close / anchor;
+  const scaled = existing.map((price, index) => (index === existing.length - 1 ? close : price * scale));
+  return scaled.slice(-priceDates.length);
+}
+
 function parseCsv(text) {
   const rows = [];
   let row = [];
@@ -452,9 +462,20 @@ function applyTwseMarketData(payload) {
       ? "ETF / ETN"
       : sectorNames[company?.["產業別"]] || stocks[symbol]?.sector || "上市公司";
     const previous = close - toNumber(row.Change);
-    const generatedPrices = stocks[symbol]?.prices?.length
-      ? [...stocks[symbol].prices.slice(0, -1), close]
-      : [previous * 0.76, previous * 0.82, previous * 0.88, previous * 0.92, previous * 0.97, previous, close, close * 0.99, close * 1.01, previous, close];
+    const fallbackPrices = [
+      previous * 0.76,
+      previous * 0.82,
+      previous * 0.88,
+      previous * 0.92,
+      previous * 0.97,
+      previous,
+      close,
+      close * 0.99,
+      close * 1.01,
+      previous,
+      close,
+    ];
+    const generatedPrices = anchoredPriceSeries(symbol, close, fallbackPrices);
 
     stocks[symbol] = {
       name: company?.["公司簡稱"] || row.Name,
@@ -467,7 +488,7 @@ function applyTwseMarketData(payload) {
       dailyChange: toNumber(row.Change),
       dailyReturn: previous > 0 ? close / previous - 1 : 0,
       tradeValue: toNumber(row.TradeValue),
-      prices: generatedPrices.slice(-priceDates.length),
+      prices: generatedPrices,
     };
     added += 1;
   });
@@ -504,9 +525,19 @@ function applyTpexMarketData(payload) {
       dailyChange: toNumber(row["漲跌"]),
       dailyReturn: previous > 0 ? close / previous - 1 : 0,
       tradeValue: toNumber(row["成交金額"]),
-      prices: stocks[symbol]?.prices?.length
-        ? [...stocks[symbol].prices.slice(0, -1), close]
-        : [previous * 0.78, previous * 0.83, previous * 0.88, previous * 0.93, previous * 0.97, previous, close, close * 0.99, close * 1.01, previous, close],
+      prices: anchoredPriceSeries(symbol, close, [
+        previous * 0.78,
+        previous * 0.83,
+        previous * 0.88,
+        previous * 0.93,
+        previous * 0.97,
+        previous,
+        close,
+        close * 0.99,
+        close * 1.01,
+        previous,
+        close,
+      ]),
     };
     added += 1;
   });
@@ -531,9 +562,19 @@ function applyUsMarketData(payload) {
       dailyChange: close - previous,
       dailyReturn: previous > 0 ? close / previous - 1 : 0,
       tradeValue: toNumber(row.volume) * close,
-      prices: stocks[symbol]?.prices?.length
-        ? [...stocks[symbol].prices.slice(0, -1), close]
-        : [close * 0.72, close * 0.78, close * 0.84, close * 0.9, close * 0.96, previous, close * 0.98, close * 1.02, close * 0.99, previous, close],
+      prices: anchoredPriceSeries(symbol, close, [
+        close * 0.72,
+        close * 0.78,
+        close * 0.84,
+        close * 0.9,
+        close * 0.96,
+        previous,
+        close * 0.98,
+        close * 1.02,
+        close * 0.99,
+        previous,
+        close,
+      ]),
     };
     added += 1;
   });
@@ -619,6 +660,15 @@ function dateIndexOnOrBefore(date) {
     if (priceDates[index] <= date) return index;
   }
   return 0;
+}
+
+function nearestDateIndex(date) {
+  const target = new Date(`${date}T00:00:00`).getTime();
+  return priceDates.reduce((bestIndex, day, index) => {
+    const bestDistance = Math.abs(new Date(`${priceDates[bestIndex]}T00:00:00`).getTime() - target);
+    const distance = Math.abs(new Date(`${day}T00:00:00`).getTime() - target);
+    return distance < bestDistance ? index : bestIndex;
+  }, 0);
 }
 
 function latestPrice(symbol) {
@@ -790,18 +840,14 @@ function buildWeightedPortfolioSeries(amount) {
 function buildDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStartDate, endDate = state.dcaEndDate) {
   let invested = 0;
   let shares = 0;
-  let previousDate = "";
-  return priceDates
-    .map((date, index) => ({ date, index }))
-    .filter((point) => point.date >= startDate && point.date <= endDate)
-    .map(({ date, index }) => {
-    const installments = previousDate ? countInstallments(previousDate, date, state.dcaFrequency) : 1;
-    if (installments > 0) {
-      const amount = state.dcaAmount * installments;
-      invested += amount;
-      shares += amount / priceAtIndex(symbol, index);
+  const installments = buildDcaInstallments(startDate, endDate, state.dcaFrequency);
+  let installmentIndex = 0;
+  return dcaValuationPoints(startDate, endDate).map(({ date, index }) => {
+    while (installmentIndex < installments.length && installments[installmentIndex] <= date) {
+      invested += state.dcaAmount;
+      shares += state.dcaAmount / priceAtIndex(symbol, nearestDateIndex(installments[installmentIndex]));
+      installmentIndex += 1;
     }
-    previousDate = date;
     return {
       date,
       invested,
@@ -810,16 +856,31 @@ function buildDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStart
   });
 }
 
-function countInstallments(previousDate, currentDate, frequency) {
-  const previous = new Date(`${previousDate}T00:00:00`);
-  const current = new Date(`${currentDate}T00:00:00`);
-  if (!(current > previous)) return 0;
-  const days = Math.max(1, Math.round((current - previous) / 86_400_000));
-  if (frequency === "weekly") return Math.max(1, Math.floor(days / 7));
-  return Math.max(
-    1,
-    (current.getFullYear() - previous.getFullYear()) * 12 + current.getMonth() - previous.getMonth(),
-  );
+function dcaValuationPoints(startDate, endDate) {
+  const points = new Map();
+  points.set(startDate, nearestDateIndex(startDate));
+  priceDates.forEach((date, index) => {
+    if (date >= startDate && date <= endDate) points.set(date, index);
+  });
+  points.set(endDate, nearestDateIndex(endDate));
+  return [...points.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, index]) => ({ date, index }));
+}
+
+function buildDcaInstallments(startDate, endDate, frequency) {
+  const dates = [];
+  const current = new Date(`${startDate}T00:00:00`);
+  const end = new Date(`${endDate}T00:00:00`);
+  while (current <= end) {
+    dates.push(current.toISOString().slice(0, 10));
+    if (frequency === "weekly") {
+      current.setDate(current.getDate() + 7);
+    } else {
+      current.setMonth(current.getMonth() + 1);
+    }
+  }
+  return dates;
 }
 
 function annualizedReturn(totalReturn, years) {
@@ -1207,6 +1268,7 @@ function renderCompareEngine() {
 
 function renderDcaEngine() {
   if (state.dcaStartDate > state.dcaEndDate) {
+    $("#dcaBasis").textContent = "日期區間錯誤：開始日期必須早於結束日期。";
     $("#dcaInvested").textContent = "--";
     $("#dcaValue").textContent = "--";
     $("#dcaReturn").textContent = "--";
@@ -1218,6 +1280,11 @@ function renderDcaEngine() {
   }
 
   const seriesBySymbol = state.dcaSymbols.map((symbol) => ({ symbol, series: buildDcaSeries(symbol) }));
+  const scheduledCount = buildDcaInstallments(state.dcaStartDate, state.dcaEndDate, state.dcaFrequency).length;
+  $("#dcaBasis").textContent =
+    `計算基準：${state.dcaFrequency === "weekly" ? "每週" : "每月"}從開始日投入一次，` +
+    `每期 ${currency.format(state.dcaAmount)}，共 ${scheduledCount} 期。` +
+    "買入價與估值使用最接近的可用資料點，總資產 = 累積股數 × 期末價格。";
   const primary = seriesBySymbol[0]?.series || [];
   const rows = seriesBySymbol.map(({ symbol, series }) => {
     const last = series.at(-1) || { invested: 0, value: 0 };
