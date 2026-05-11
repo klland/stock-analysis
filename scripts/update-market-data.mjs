@@ -9,6 +9,8 @@ const endpoints = {
   daily: "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
   companies: "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
   tpexDaily: "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=EW&o=data",
+  twseHistory: "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
+  tpexHistory: "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php",
 };
 
 const usSymbols = {
@@ -135,6 +137,110 @@ function parseCsv(text) {
   return rows.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] || ""])));
 }
 
+function toNumber(value) {
+  if (value === undefined || value === null) return 0;
+  const parsed = Number(String(value).replace(/,/g, "").trim());
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function rocDateToIso(value) {
+  const text = String(value || "");
+  if (text.length !== 7) return "";
+  const year = Number(text.slice(0, 3)) + 1911;
+  return `${year}-${text.slice(3, 5)}-${text.slice(5, 7)}`;
+}
+
+function addDaysIso(isoDate, days) {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function isoToTwseDate(isoDate) {
+  return isoDate.replaceAll("-", "");
+}
+
+function isoToTpexRocDate(isoDate) {
+  const [year, month, day] = isoDate.split("-");
+  return `${Number(year) - 1911}/${month}/${day}`;
+}
+
+function parseTwseHistory(json) {
+  const table = json?.tables?.find((item) => item.fields?.includes("證券代號") && item.fields?.includes("收盤價"));
+  if (!table?.data?.length) return {};
+  const codeIndex = table.fields.indexOf("證券代號");
+  const closeIndex = table.fields.indexOf("收盤價");
+  return Object.fromEntries(
+    table.data
+      .map((row) => [String(row[codeIndex] || "").trim(), toNumber(row[closeIndex])])
+      .filter(([symbol, close]) => symbol && close > 0),
+  );
+}
+
+function parseTpexHistory(json) {
+  const table = json?.tables?.[0];
+  if (!table?.data?.length) return {};
+  const codeIndex = table.fields.findIndex((field) => field.trim() === "代號");
+  const closeIndex = table.fields.findIndex((field) => field.trim() === "收盤");
+  if (codeIndex === -1 || closeIndex === -1) return {};
+  return Object.fromEntries(
+    table.data
+      .map((row) => [String(row[codeIndex] || "").trim(), toNumber(row[closeIndex])])
+      .filter(([symbol, close]) => symbol && close > 0),
+  );
+}
+
+async function getTwseHistory(isoDate) {
+  const url = `${endpoints.twseHistory}?date=${isoToTwseDate(isoDate)}&type=ALLBUT0999&response=json`;
+  return parseTwseHistory(await getJson(url));
+}
+
+async function getTpexHistory(isoDate) {
+  const params = new URLSearchParams({
+    l: "zh-tw",
+    d: isoToTpexRocDate(isoDate),
+    se: "EW",
+    o: "json",
+  });
+  return parseTpexHistory(await getJson(`${endpoints.tpexHistory}?${params}`));
+}
+
+async function getHistorySnapshot(period, targetDate) {
+  for (let offset = 0; offset <= 14; offset += 1) {
+    const date = addDaysIso(targetDate, -offset);
+    const [twseResult, tpexResult] = await Promise.allSettled([getTwseHistory(date), getTpexHistory(date)]);
+    const twse = twseResult.status === "fulfilled" ? twseResult.value : {};
+    const tpex = tpexResult.status === "fulfilled" ? tpexResult.value : {};
+    const closes = { ...twse, ...tpex };
+    const count = Object.keys(closes).length;
+    if (count > 100) {
+      return {
+        period,
+        targetDate,
+        date,
+        closes,
+        twseCount: Object.keys(twse).length,
+        tpexCount: Object.keys(tpex).length,
+      };
+    }
+  }
+  console.warn(`No historical snapshot found for ${period} near ${targetDate}`);
+  return { period, targetDate, date: "", closes: {}, twseCount: 0, tpexCount: 0 };
+}
+
+async function getHistorySnapshots(latestDate) {
+  const lookbacks = [
+    ["1w", 7],
+    ["1m", 30],
+    ["1y", 365],
+  ];
+  const periods = {};
+  for (const [period, days] of lookbacks) {
+    periods[period] = await getHistorySnapshot(period, addDaysIso(latestDate, -days));
+  }
+  return { latestDate, periods };
+}
+
 async function getUsQuote(symbol) {
   try {
     const stooqSymbol = symbol.replace("_", "-").toLowerCase();
@@ -173,11 +279,14 @@ const [daily, companies, tpexCsv, usDaily] = await Promise.all([
 ]);
 
 const tpexDaily = parseCsv(tpexCsv);
+const latestDate = rocDateToIso(daily?.[0]?.Date || "");
+const history = latestDate ? await getHistorySnapshots(latestDate) : { latestDate: "", periods: {} };
 const payload = {
   daily,
   companies,
   tpexDaily,
   usDaily,
+  history,
   fetchedAt: new Date().toISOString(),
   date: daily?.[0]?.Date || "",
   source: endpoints,
@@ -191,5 +300,5 @@ await writeFile(
 );
 
 console.log(
-  `Wrote ${outFile} with ${daily.length} TWSE rows, ${tpexDaily.length} TPEx rows, ${companies.length} company rows, and ${payload.usDaily.length} US rows.`,
+  `Wrote ${outFile} with ${daily.length} TWSE rows, ${tpexDaily.length} TPEx rows, ${companies.length} company rows, ${payload.usDaily.length} US rows, and ${Object.keys(history.periods).length} history snapshots.`,
 );

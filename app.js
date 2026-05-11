@@ -123,6 +123,7 @@ const TWSE_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_
 const TWSE_COMPANY_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L";
 const TPEX_DAILY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=EW&o=data";
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
+let marketHistoryPeriods = {};
 const USER_STATE_KEY = "decision-ledger-user-state-v1";
 const usEtfSymbols = new Set(["SPY", "QQQ", "VOO", "VTI", "IVV", "SCHD", "VGT", "XLK", "SMH", "SOXX", "DIA", "IWM", "TLT", "BND", "AGG", "IBIT"]);
 let userStateLoaded = false;
@@ -449,6 +450,7 @@ async function fetchMarketData() {
 
 function applyTwseMarketData(payload) {
   const companyMap = new Map(payload.companies.map((item) => [item["公司代號"], item]));
+  marketHistoryPeriods = payload.history?.periods || {};
   let added = 0;
 
   payload.daily.forEach((row) => {
@@ -487,6 +489,7 @@ function applyTwseMarketData(payload) {
       live: true,
       dailyChange: toNumber(row.Change),
       dailyReturn: previous > 0 ? close / previous - 1 : 0,
+      periodReturns: historicalReturnsFor(symbol, close),
       tradeValue: toNumber(row.TradeValue),
       prices: generatedPrices,
     };
@@ -524,6 +527,7 @@ function applyTpexMarketData(payload) {
       live: true,
       dailyChange: toNumber(row["漲跌"]),
       dailyReturn: previous > 0 ? close / previous - 1 : 0,
+      periodReturns: historicalReturnsFor(symbol, close),
       tradeValue: toNumber(row["成交金額"]),
       prices: anchoredPriceSeries(symbol, close, [
         previous * 0.78,
@@ -717,10 +721,45 @@ function periodReturn(symbol, period = "1y") {
   return periodReturnDetail(symbol, period).returnRate;
 }
 
-const liveRankingPeriods = new Set(["today", "1d"]);
+function historicalReturnsFor(symbol, close) {
+  return Object.fromEntries(
+    ["1w", "1m", "1y"].map((period) => {
+      const baseClose = toNumber(marketHistoryPeriods[period]?.closes?.[symbol]);
+      return [period, baseClose > 0 ? close / baseClose - 1 : null];
+    }),
+  );
+}
+
+function isRankingPeriodAvailable(period) {
+  if (period === "today" || period === "1d") return true;
+  return Object.values(stocks).some((stock) => Number.isFinite(stock.periodReturns?.[period]));
+}
 
 function normalizeRankingPeriod() {
-  if (!liveRankingPeriods.has(state.rankingPeriod)) state.rankingPeriod = "today";
+  if (!isRankingPeriodAvailable(state.rankingPeriod)) state.rankingPeriod = "today";
+}
+
+function rankingReturn(symbol, period) {
+  if (period === "today" || period === "1d") return stocks[symbol]?.dailyReturn || 0;
+  const value = stocks[symbol]?.periodReturns?.[period];
+  return Number.isFinite(value) ? value : null;
+}
+
+function rankingPeriodLabel(period) {
+  if (period === "today") return "今日";
+  if (period === "1d") return "1日";
+  if (period === "1w") return "1週";
+  if (period === "1m") return "1月";
+  if (period === "1y") return "1年";
+  return period;
+}
+
+function updateRankingPeriodOptions() {
+  [...$("#rankingPeriod").options].forEach((option) => {
+    const available = isRankingPeriodAvailable(option.value);
+    option.disabled = !available;
+    option.textContent = available ? rankingPeriodLabel(option.value) : `${rankingPeriodLabel(option.value)}（需歷史資料）`;
+  });
 }
 
 function allPeriodReturns(symbol) {
@@ -1097,6 +1136,7 @@ function renderControls() {
   $("#comparePeriod").value = state.comparePeriod;
   $("#compareStartDate").value = state.compareStartDate;
   $("#compareEndDate").value = state.compareEndDate;
+  updateRankingPeriodOptions();
   $("#rankingPeriod").value = state.rankingPeriod;
   $("#dcaStartDate").value = state.dcaStartDate;
   $("#dcaEndDate").value = state.dcaEndDate;
@@ -1344,23 +1384,32 @@ function renderDcaEngine() {
 
 function renderMarketRanking() {
   normalizeRankingPeriod();
+  updateRankingPeriodOptions();
   $("#rankingPeriod").value = state.rankingPeriod;
-  $("#rankingReturnHeader").textContent = state.rankingPeriod === "1d" ? "1日漲幅" : "今日漲幅";
+  $("#rankingReturnHeader").textContent = `${rankingPeriodLabel(state.rankingPeriod)}漲幅`;
   const sourceSymbols = Object.keys(stocks).filter(isTaiwanRankingSymbol);
   const sectors = ["全部", ...new Set(sourceSymbols.map((symbol) => stocks[symbol].sector).filter(Boolean))];
   $("#sectorFilter").innerHTML = sectors.map((sector) => `<option value="${sector}">${sector}</option>`).join("");
   if (!sectors.includes(state.sector)) state.sector = "全部";
   $("#sectorFilter").value = state.sector;
-  $("#rankingNote").textContent = "目前排行榜只顯示證交所與櫃買中心每日真實行情漲跌幅；1週 / 1月 / 1年需接上每日 price_history 後才會開啟，避免顯示錯誤漲幅。";
+  const history = marketHistoryPeriods[state.rankingPeriod];
+  $("#rankingNote").textContent =
+    state.rankingPeriod === "today" || state.rankingPeriod === "1d"
+      ? "今日 / 1日排行使用證交所與櫃買中心每日真實行情漲跌幅。"
+      : `${rankingPeriodLabel(state.rankingPeriod)}排行使用 ${history?.date || "歷史基準日"} 到 ${state.marketDataDate} 的官方原始收盤價計算；遇假日會往前取最近交易日，尚未還原除權息。`;
 
   const rows = sourceSymbols
     .filter((symbol) => state.sector === "全部" || stocks[symbol].sector === state.sector)
-    .map((symbol) => ({
-      symbol,
-      returnRate: stocks[symbol].dailyReturn || 0,
-      score: continuityScore(symbol),
-      marketCap: stocks[symbol].marketCap || 0,
-    }))
+    .map((symbol) => {
+      const returnRate = rankingReturn(symbol, state.rankingPeriod);
+      return {
+        symbol,
+        returnRate,
+        score: continuityScore(symbol),
+        marketCap: stocks[symbol].marketCap || 0,
+      };
+    })
+    .filter((row) => Number.isFinite(row.returnRate))
     .sort((a, b) => b.returnRate - a.returnRate)
     .slice(0, 10);
 
@@ -1588,7 +1637,7 @@ function bindEvents() {
   });
 
   $("#rankingPeriod").addEventListener("change", (event) => {
-    state.rankingPeriod = liveRankingPeriods.has(event.target.value) ? event.target.value : "today";
+    state.rankingPeriod = isRankingPeriodAvailable(event.target.value) ? event.target.value : "today";
     event.target.value = state.rankingPeriod;
     saveUserState();
     renderMarketRanking();

@@ -51,7 +51,13 @@ jobs:
             console.error(`Missing required symbols: ${missing.join(', ')}`);
             process.exit(1);
           }
-          console.log(`Market data date ${d.date}; TWSE ${d.daily.length}, TPEx ${d.tpexDaily.length}, companies ${d.companies.length}, US ${d.usDaily.length}.`);"
+          const historyPeriods = ['1w', '1m', '1y'];
+          const missingHistory = historyPeriods.filter((period) => !d.history?.periods?.[period]?.date || Object.keys(d.history.periods[period].closes || {}).length < 100);
+          if (missingHistory.length) {
+            console.error(`Missing historical snapshots: ${missingHistory.join(', ')}`);
+            process.exit(1);
+          }
+          console.log(`Market data date ${d.date}; TWSE ${d.daily.length}, TPEx ${d.tpexDaily.length}, companies ${d.companies.length}, US ${d.usDaily.length}, history ${historyPeriods.join('/')}.`);"
 
       - name: Commit refreshed data
         run: |
