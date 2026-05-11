@@ -132,6 +132,7 @@ const USER_STATE_KEY = "decision-ledger-user-state-v1";
 const usEtfSymbols = new Set(["SPY", "QQQ", "VOO", "VTI", "IVV", "SCHD", "VGT", "XLK", "SMH", "SOXX", "DIA", "IWM", "TLT", "BND", "AGG", "IBIT"]);
 let userStateLoaded = false;
 let singleTradeRenderToken = 0;
+let compareRenderToken = 0;
 
 const sectorNames = {
   "01": "水泥",
@@ -514,6 +515,11 @@ async function fetchTpexHistory(date) {
 }
 
 async function historicalCloseSnapshotOnOrBefore(targetDate) {
+  const bundledSnapshot = Object.values(marketHistoryPeriods)
+    .filter((snapshot) => snapshot?.date && snapshot.date <= targetDate && snapshot.date >= addDaysIso(targetDate, -14) && snapshot.closes)
+    .sort((a, b) => b.date.localeCompare(a.date))[0];
+  if (bundledSnapshot) return bundledSnapshot;
+
   const cache = readHistoryCloseCache();
   for (let offset = 0; offset <= 14; offset += 1) {
     const date = addDaysIso(targetDate, -offset);
@@ -952,6 +958,35 @@ function updateRankingPeriodOptions() {
 
 function allPeriodReturns(symbol) {
   return ["1d", "1w", "1m", "1y"].map((period) => periodReturn(symbol, period));
+}
+
+function comparePeriodDates(period = state.comparePeriod) {
+  if (period === "custom") {
+    return { startTarget: state.compareStartDate, endTarget: state.compareEndDate, label: "自訂時間" };
+  }
+  const endTarget = state.marketDataDate || priceDates.at(-1);
+  const lookbackDays = { "1d": 1, "1w": 7, "1m": 30, "1y": 365 }[period] || 30;
+  return {
+    startTarget: addDaysIso(endTarget, -lookbackDays),
+    endTarget,
+    label: $("#comparePeriod")?.selectedOptions?.[0]?.textContent || period,
+  };
+}
+
+function closeFromHistoricalSnapshot(symbol, snapshot) {
+  return toNumber(snapshot?.closes?.[symbol]);
+}
+
+async function compareSnapshotFor(date) {
+  if (state.marketDataDate && date >= state.marketDataDate) {
+    return { date: state.marketDataDate, latest: true };
+  }
+  return historicalCloseSnapshotOnOrBefore(date);
+}
+
+function compareClose(symbol, snapshot) {
+  if (snapshot?.latest) return latestPrice(symbol);
+  return closeFromHistoricalSnapshot(symbol, snapshot);
 }
 
 function sharesFor(trade, symbol = trade.symbol) {
@@ -1598,7 +1633,8 @@ function renderPortfolioEngine() {
   `;
 }
 
-function renderCompareEngine() {
+async function renderCompareEngine() {
+  const token = ++compareRenderToken;
   const customFields = $("#compareCustomFields");
   customFields.hidden = state.comparePeriod !== "custom";
   if (state.comparePeriod === "custom" && state.compareStartDate > state.compareEndDate) {
@@ -1608,18 +1644,42 @@ function renderCompareEngine() {
     return;
   }
 
+  const { startTarget, endTarget, label: periodLabel } = comparePeriodDates();
+  $("#compareBasis").textContent = `正在取得 ${startTarget} 到 ${endTarget} 的官方收盤價...`;
+  drawBarChart($("#compareBarChart"), []);
+  $("#compareBreakdown").innerHTML = "";
+
+  const [startSnapshot, endSnapshot] = await Promise.all([compareSnapshotFor(startTarget), compareSnapshotFor(endTarget)]);
+  if (token !== compareRenderToken) return;
+
+  if (!startSnapshot || !endSnapshot) {
+    $("#compareBasis").textContent = `無法取得 ${startTarget} 到 ${endTarget} 的官方收盤價，先不產生比較結果，避免顯示錯誤資料。`;
+    return;
+  }
+
   const rows = state.compareSymbols
-    .map((symbol) => periodReturnDetail(symbol, state.comparePeriod))
+    .map((symbol) => {
+      const startPrice = compareClose(symbol, startSnapshot);
+      const endPrice = compareClose(symbol, endSnapshot);
+      return {
+        symbol,
+        startDate: startSnapshot.date,
+        endDate: endSnapshot.date,
+        startPrice,
+        endPrice,
+        returnRate: startPrice > 0 && endPrice > 0 ? endPrice / startPrice - 1 : null,
+      };
+    })
+    .filter((row) => Number.isFinite(row.returnRate))
     .sort((a, b) => b.returnRate - a.returnRate);
   drawBarChart($("#compareBarChart"), rows);
 
   const first = rows[0];
-  const periodLabel = state.comparePeriod === "custom" ? "自訂時間" : $("#comparePeriod").selectedOptions[0]?.textContent || state.comparePeriod;
   const startDate = first?.startDate || "--";
   const endDate = first?.endDate || "--";
   $("#compareBasis").textContent =
     `比較基準：${periodLabel}，用「報酬率 = (結束價 - 起始價) / 起始價」排序。` +
-    `目前區間 ${startDate} 到 ${endDate}；若自訂日期不是資料日期，會使用最接近的可用交易資料點。`;
+    `目前區間 ${startDate} 到 ${endDate}；1月就是最新資料日往前 30 天，若該日休市則往前取最近交易日。`;
 
   $("#compareBreakdown").innerHTML = rows.length
     ? rows
