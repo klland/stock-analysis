@@ -1367,7 +1367,10 @@ function summarizePortfolio() {
 
 function portfolioWeights() {
   const inputs = [...document.querySelectorAll("[data-weight]")];
-  return inputs.map((input) => ({ symbol: input.dataset.weight, weight: Number(input.value) / 100 || 0 }));
+  return inputs.map((input) => {
+    const percentValue = Math.max(0, Math.min(100, Number(input.value) || 0));
+    return { symbol: input.dataset.weight, percent: percentValue, weight: percentValue / 100 };
+  });
 }
 
 function syncPortfolioWeightsFromInputs() {
@@ -1376,20 +1379,77 @@ function syncPortfolioWeightsFromInputs() {
   );
 }
 
-function buildWeightedPortfolioSeries(amount) {
+function portfolioWeightTotal(weights = portfolioWeights()) {
+  return weights.reduce((sum, item) => sum + item.weight, 0);
+}
+
+function portfolioStartDate(weights) {
+  const firstDates = weights
+    .filter((item) => item.weight > 0)
+    .map((item) => marketPriceSeries(item.symbol).find((point) => point.value > 0)?.date)
+    .filter(Boolean);
+  return firstDates.length ? firstDates.sort((a, b) => b.localeCompare(a))[0] : "";
+}
+
+function portfolioDetailRows(amount, weights, startDate, endDate) {
+  return weights
+    .filter((item) => item.weight > 0)
+    .map((item) => {
+      const startPoint = marketPricePointOnOrBefore(item.symbol, startDate);
+      const endPoint = marketPricePointOnOrBefore(item.symbol, endDate);
+      const startPrice = toNumber(startPoint?.value);
+      const endPrice = toNumber(endPoint?.value);
+      const allocated = amount * item.weight;
+      const value = startPrice > 0 && endPrice > 0 ? allocated * (endPrice / startPrice) : 0;
+      return {
+        ...item,
+        startDate: startPoint?.date || startDate,
+        endDate: endPoint?.date || endDate,
+        startPrice,
+        endPrice,
+        allocated,
+        value,
+        returnRate: allocated > 0 && value > 0 ? value / allocated - 1 : NaN,
+      };
+    });
+}
+
+function buildWeightedPortfolio(amount) {
   const weights = portfolioWeights();
+  const weightSum = Math.min(1, portfolioWeightTotal(weights));
+  const startDate = portfolioStartDate(weights);
+  if (!startDate) return { series: [], weights, weightSum, startDate: "", endDate: "", details: [] };
   const dates = [
-    ...new Set(weights.flatMap((item) => marketPriceSeries(item.symbol).map((point) => point.date))),
+    ...new Set(weights.flatMap((item) => marketPriceSeries(item.symbol).map((point) => point.date)).filter((date) => date >= startDate)),
   ].sort((a, b) => a.localeCompare(b));
-  return dates.map((date) => {
+  const cash = amount * Math.max(0, 1 - weightSum);
+  const series = dates.map((date) => {
     const value = weights.reduce((sum, item) => {
+      if (item.weight <= 0) return sum;
       const startPrice = priceOnOrBefore(item.symbol, dates[0]);
       const currentPrice = priceOnOrBefore(item.symbol, date);
       if (!(startPrice > 0) || !(currentPrice > 0)) return sum;
       return sum + amount * item.weight * (currentPrice / startPrice);
-    }, 0);
+    }, cash);
     return { date, value };
   }).filter((point) => point.value > 0);
+  const endDate = series.at(-1)?.date || dates.at(-1) || "";
+  return { series, weights, weightSum, startDate, endDate, details: portfolioDetailRows(amount, weights, startDate, endDate), cash };
+}
+
+function buildWeightedPortfolioSeries(amount) {
+  return buildWeightedPortfolio(amount).series;
+}
+
+function enforcePortfolioWeightLimit(changedInput) {
+  const inputs = [...document.querySelectorAll("[data-weight]")];
+  if (!changedInput) return;
+  const otherTotal = inputs
+    .filter((input) => input !== changedInput)
+    .reduce((sum, input) => sum + Math.max(0, Math.min(100, Number(input.value) || 0)), 0);
+  const maxAllowed = Math.max(0, 100 - otherTotal);
+  const nextValue = Math.max(0, Math.min(maxAllowed, Number(changedInput.value) || 0));
+  changedInput.value = Number.isInteger(nextValue) ? String(nextValue) : nextValue.toFixed(2);
 }
 
 function buildDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStartDate, endDate = state.dcaEndDate) {
@@ -1837,16 +1897,21 @@ function renderControls() {
   renderDcaList();
 
   const defaultWeights = { "2330": 35, "0050": 35, "2454": 20, "2881": 10, "2317": 10 };
+  let assignedWeight = 0;
   $("#portfolioWeights").innerHTML = state.portfolioSymbols
-    .map(
-      (symbol) => `
+    .map((symbol) => {
+      const rawWeight = Math.max(0, Math.min(100, Number(state.portfolioWeights[symbol] ?? defaultWeights[symbol] ?? 0)));
+      const weight = Math.min(rawWeight, Math.max(0, 100 - assignedWeight));
+      assignedWeight += weight;
+      state.portfolioWeights[symbol] = weight;
+      return `
         <label class="weight-item">
           <span>${symbol} ${stocks[symbol].name}</span>
-          <input data-weight="${symbol}" type="number" min="0" max="100" step="5" value="${state.portfolioWeights[symbol] ?? defaultWeights[symbol] ?? 0}" />
+          <input data-weight="${symbol}" type="number" min="0" max="100" step="5" value="${weight}" />
           <button class="delete-btn" type="button" data-remove-portfolio="${symbol}">刪除</button>
         </label>
-      `,
-    )
+      `;
+    })
     .join("");
 }
 
@@ -1988,19 +2053,39 @@ async function renderSingleTradeAnalysis() {
 
 function renderPortfolioEngine() {
   const amount = Number($("#portfolioAmount").value) || 0;
-  const weightSum = portfolioWeights().reduce((sum, item) => sum + item.weight, 0);
-  const series = buildWeightedPortfolioSeries(amount);
+  const portfolio = buildWeightedPortfolio(amount);
+  const { series, weightSum, startDate, endDate, details, cash } = portfolio;
+  if (!series.length) {
+    $("#portfolioBasis").textContent = "請先加入至少一檔股票並設定權重。";
+    $("#portfolioResults").innerHTML = "";
+    return;
+  }
   const finalValue = series.at(-1).value;
   const totalReturn = amount ? finalValue / amount - 1 : 0;
-  const normalized = Math.abs(weightSum - 1) < 0.001 ? "權重合計 100%" : `權重合計 ${Math.round(weightSum * 100)}%`;
+  const weightPercent = Math.round(weightSum * 1000) / 10;
+  const unallocatedPercent = Math.max(0, 100 - weightPercent);
+  $("#portfolioBasis").textContent =
+    `計算區間：${startDate} 到 ${endDate}。權重加總上限為 100%，目前已配置 ${weightPercent}%` +
+    `${unallocatedPercent ? `，未配置 ${unallocatedPercent}% 以現金保留` : ""}。總報酬 = 期末組合市值 / 投入金額 - 1。`;
 
   $("#portfolioResults").innerHTML = `
-    <div class="analysis-card"><span>${normalized}</span><strong>${currency.format(finalValue)}</strong><small>目前組合市值</small></div>
-    <div class="analysis-card"><span>報酬率</span><strong class="${classForReturn(totalReturn)}">${percent.format(totalReturn)}</strong><small>組合報酬 = 加權個股報酬</small></div>
+    <div class="analysis-card"><span>目前組合市值</span><strong>${currency.format(finalValue)}</strong><small>股票市值 + 現金 ${currency.format(cash || 0)}</small></div>
+    <div class="analysis-card"><span>總報酬</span><strong class="${classForReturn(totalReturn)}">${percent.format(totalReturn)}</strong><small>${startDate} 到 ${endDate}</small></div>
     <div class="analysis-card"><span>最大跌幅</span><strong class="return-negative">${percent.format(maxDrawdown(series))}</strong><small>歷史資產高點到低點</small></div>
     <div class="analysis-card"><span>波動度</span><strong>${percent.format(volatility(series))}</strong><small>時間序列標準差</small></div>
     <div class="analysis-card"><span>勝率</span><strong>${percent.format(winRate(series))}</strong><small>有多少期間為正報酬</small></div>
     <div class="analysis-card"><span>Sharpe Ratio</span><strong>${sharpeRatio(series).toFixed(2)}</strong><small>報酬 / 風險</small></div>
+    ${details
+      .map(
+        (row) => `
+          <div class="analysis-card">
+            <span>${row.percent}% · ${row.symbol}</span>
+            <strong class="${classForReturn(row.returnRate)}">${metricValue(row.returnRate)}</strong>
+            <small>${row.startDate} ${row.startPrice.toFixed(2)} → ${row.endDate} ${row.endPrice.toFixed(2)}</small>
+          </div>
+        `,
+      )
+      .join("")}
   `;
 }
 
@@ -2393,7 +2478,9 @@ function bindEvents() {
     event.preventDefault();
     const symbol = $("#portfolioAddSelect").value;
     if (!symbol) return;
+    const remaining = Math.max(0, 100 - portfolioWeights().reduce((sum, item) => sum + item.percent, 0));
     state.portfolioSymbols = uniqueSymbols([...state.portfolioSymbols, symbol]);
+    state.portfolioWeights[symbol] = Math.min(remaining, 10);
     saveUserState();
     renderControls();
     renderPortfolioEngine();
@@ -2423,7 +2510,8 @@ function bindEvents() {
     saveUserState();
     renderPortfolioEngine();
   });
-  $("#portfolioWeights").addEventListener("input", () => {
+  $("#portfolioWeights").addEventListener("input", (event) => {
+    if (event.target.matches("[data-weight]")) enforcePortfolioWeightLimit(event.target);
     syncPortfolioWeightsFromInputs();
     saveUserState();
     renderPortfolioEngine();
