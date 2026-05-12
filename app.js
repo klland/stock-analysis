@@ -126,8 +126,8 @@ const TWSE_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX";
 const TPEX_HISTORY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php";
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
 const HISTORY_CLOSE_CACHE_KEY = "decision-ledger-history-close-cache-v1";
-const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-adjusted-close-cache-v1";
-const ADJUSTED_HISTORY_CACHE_KEY = "decision-ledger-adjusted-history-cache-v1";
+const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-close-cache-v2";
+const ADJUSTED_HISTORY_CACHE_KEY = "decision-ledger-close-history-cache-v2";
 let marketHistoryPeriods = {};
 let marketDcaSnapshots = {};
 let marketDcaSeries = {};
@@ -603,13 +603,13 @@ async function adjustedCloseOnOrBefore(symbol, targetDate) {
   const points = timestamps
     .map((timestamp, index) => ({
       date: taiwanDateFromTimestamp(timestamp),
-      value: toNumber(adjusted[index]) || toNumber(closes[index]),
+      value: toNumber(closes[index]) || toNumber(adjusted[index]),
     }))
     .filter((point) => point.date <= targetDate && point.value > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
   const point = points.at(-1) || null;
   if (point) {
-    cache[cacheKey] = { ...point, source: "adjusted" };
+    cache[cacheKey] = { ...point, source: "close" };
     writeAdjustedCloseCache(cache);
     return cache[cacheKey];
   }
@@ -635,7 +635,7 @@ async function adjustedHistoryFor(symbol, startDate, endDate) {
   const points = timestamps
     .map((timestamp, index) => ({
       date: taiwanDateFromTimestamp(timestamp),
-      value: toNumber(adjusted[index]) || toNumber(closes[index]),
+      value: toNumber(closes[index]) || toNumber(adjusted[index]),
     }))
     .filter((point) => point.date >= addDaysIso(startDate, -10) && point.date <= addDaysIso(endDate, 3) && point.value > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
@@ -653,7 +653,41 @@ function pricePointOnOrBefore(points, date) {
   for (let index = points.length - 1; index >= 0; index -= 1) {
     if (points[index].date <= date) return points[index];
   }
-  return points[0] || null;
+  return null;
+}
+
+function sortedPricePoints(points) {
+  return (points || [])
+    .filter((point) => point?.date && toNumber(point.value) > 0)
+    .map((point) => ({ date: point.date, value: toNumber(point.value), source: point.source || "history" }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function marketPriceSeries(symbol) {
+  const bundled = sortedPricePoints(marketDcaSeries[symbol]?.points || []);
+  if (bundled.length) return bundled;
+
+  const snapshotPoints = Object.values(marketHistoryPeriods)
+    .filter((snapshot) => snapshot?.date && toNumber(snapshot.closes?.[symbol]) > 0)
+    .map((snapshot) => ({ date: snapshot.date, value: toNumber(snapshot.closes[symbol]), source: "snapshot" }));
+  const currentDate = state.marketDataDate || priceDates.at(-1);
+  const current = stocks[symbol]?.prices?.at(-1);
+  if (currentDate && current > 0) snapshotPoints.push({ date: currentDate, value: current, source: "current" });
+  if (snapshotPoints.length) return sortedPricePoints(snapshotPoints);
+
+  return priceDates
+    .map((date, index) => ({ date, value: toNumber(stocks[symbol]?.prices?.[index]), source: "sample" }))
+    .filter((point) => point.value > 0);
+}
+
+function marketPricePointOnOrBefore(symbol, date) {
+  return pricePointOnOrBefore(marketPriceSeries(symbol), date);
+}
+
+function marketPricePointNearOrBefore(symbol, date, maxLookbackDays = 14) {
+  const point = marketPricePointOnOrBefore(symbol, date);
+  if (!point?.date) return null;
+  return point.date >= addDaysIso(date, -maxLookbackDays) ? point : null;
 }
 
 async function mapWithConcurrency(items, limit, mapper) {
@@ -899,9 +933,8 @@ function seriesFor(symbol) {
 }
 
 function priceOnOrAfter(symbol, date) {
-  const index = priceDates.findIndex((day) => day >= date);
-  const safeIndex = index === -1 ? priceDates.length - 1 : index;
-  return stocks[symbol].prices[safeIndex];
+  const point = pricePointOnOrAfter(marketPriceSeries(symbol), date);
+  return point?.value || 0;
 }
 
 function previousClose(symbol) {
@@ -913,14 +946,13 @@ function previousClose(symbol) {
 }
 
 function priceOnOrBefore(symbol, date) {
+  const point = marketPricePointOnOrBefore(symbol, date);
+  if (point?.value > 0) return point.value;
   if (stocks[symbol]?.live && state.marketDataDate && date < state.marketDataDate) {
-    const lastKnownHistoricalDate = priceDates.at(-2);
-    if (!lastKnownHistoricalDate || date >= lastKnownHistoricalDate) {
-      const previous = previousClose(symbol);
-      if (previous > 0) return previous;
-    }
+    const previous = previousClose(symbol);
+    if (previous > 0) return previous;
   }
-  return priceAtIndex(symbol, dateIndexOnOrBefore(date));
+  return 0;
 }
 
 function entryPriceForTrade(trade, symbol = trade.symbol) {
@@ -929,7 +961,8 @@ function entryPriceForTrade(trade, symbol = trade.symbol) {
 }
 
 function priceAtIndex(symbol, index) {
-  return stocks[symbol].prices[Math.max(0, Math.min(index, priceDates.length - 1))];
+  const date = priceDates[Math.max(0, Math.min(index, priceDates.length - 1))];
+  return priceOnOrBefore(symbol, date) || toNumber(stocks[symbol]?.prices?.[Math.max(0, Math.min(index, priceDates.length - 1))]);
 }
 
 function dateIndexOnOrAfter(date) {
@@ -954,7 +987,9 @@ function nearestDateIndex(date) {
 }
 
 function latestPrice(symbol) {
-  return stocks[symbol].prices.at(-1);
+  const latestDate = state.marketDataDate || priceDates.at(-1);
+  const point = marketPricePointOnOrBefore(symbol, latestDate);
+  return point?.value || toNumber(stocks[symbol]?.prices?.at(-1));
 }
 
 function compareWindow(period = "1y") {
@@ -1073,6 +1108,13 @@ function compareClose(symbol, snapshot) {
   return closeFromHistoricalSnapshot(symbol, snapshot);
 }
 
+function comparePricePoint(symbol, targetDate, snapshot) {
+  const bundled = marketPricePointNearOrBefore(symbol, targetDate, 14);
+  if (bundled?.value > 0) return bundled;
+  const snapshotClose = snapshot?.latest ? latestPrice(symbol) : closeFromHistoricalSnapshot(symbol, snapshot);
+  return snapshotClose > 0 ? { date: snapshot.date || targetDate, value: snapshotClose, source: "snapshot" } : null;
+}
+
 function sharesFor(trade, symbol = trade.symbol) {
   if (symbol === trade.symbol && Number.isFinite(Number(trade.shares))) return Number(trade.shares);
   const entryPrice = entryPriceForTrade(trade, symbol);
@@ -1109,12 +1151,12 @@ function hypotheticalTradeResult(trade, symbol, entryPoint) {
 
 async function entryPointForScenario(symbol, targetDate) {
   const bundledPoint = pricePointOnOrBefore(marketDcaSeries[symbol]?.points || [], targetDate);
-  if (bundledPoint?.value > 0 && bundledPoint.date <= targetDate) return { date: bundledPoint.date, value: bundledPoint.value, source: "adjusted" };
+  if (bundledPoint?.value > 0 && bundledPoint.date <= targetDate) return { date: bundledPoint.date, value: bundledPoint.value, source: "close" };
   try {
     const adjusted = await adjustedCloseOnOrBefore(symbol, targetDate);
     if (adjusted?.value > 0) return adjusted;
   } catch (error) {
-    console.warn(`Scenario adjusted close unavailable for ${symbol}: ${error.message}`);
+    console.warn(`Scenario close unavailable for ${symbol}: ${error.message}`);
   }
   return null;
 }
@@ -1163,12 +1205,12 @@ function actualTradeResult(trade) {
 
 async function entryPointForHypothetical(symbol, targetDate, snapshot) {
   const bundledPoint = pricePointOnOrBefore(marketDcaSeries[symbol]?.points || [], targetDate);
-  if (bundledPoint?.value > 0 && bundledPoint.date <= targetDate) return { date: bundledPoint.date, value: bundledPoint.value, source: "adjusted" };
+  if (bundledPoint?.value > 0 && bundledPoint.date <= targetDate) return { date: bundledPoint.date, value: bundledPoint.value, source: "close" };
   try {
     const adjusted = await adjustedCloseOnOrBefore(symbol, targetDate);
     if (adjusted?.value > 0) return adjusted;
   } catch (error) {
-    console.warn(`Adjusted close unavailable for ${symbol}: ${error.message}`);
+    console.warn(`Close unavailable for ${symbol}: ${error.message}`);
   }
   const raw = toNumber(snapshot?.closes?.[symbol]);
   return raw > 0 ? { date: snapshot.date, value: raw, source: "raw" } : null;
@@ -1205,10 +1247,8 @@ function entryPriceForScenarioSync(symbol, trade) {
 }
 
 function buildScenarioEquitySeries(symbolMode = "real") {
-  const dcaDates = Object.values(marketDcaSeries)
-    .flatMap((history) => (history.points || []).map((point) => point.date))
-    .filter((date) => trades.some((trade) => trade.date <= date));
-  const dates = [...new Set([...priceDates, ...Object.values(marketHistoryPeriods).map((snapshot) => snapshot.date).filter(Boolean), ...dcaDates, state.marketDataDate].filter(Boolean))]
+  const symbols = symbolMode === "real" ? uniqueSymbols(trades.map((trade) => trade.symbol)) : [symbolMode];
+  const dates = [...new Set(symbols.flatMap((symbol) => marketPriceSeries(symbol).map((point) => point.date)).filter((date) => trades.some((trade) => trade.date <= date)))]
     .sort((a, b) => a.localeCompare(b));
 
   return dates
@@ -1269,14 +1309,7 @@ function sharpeRatio(series) {
 }
 
 function snapshotPricePoints(symbol) {
-  const points = Object.values(marketHistoryPeriods)
-    .filter((snapshot) => snapshot?.date && toNumber(snapshot.closes?.[symbol]) > 0)
-    .map((snapshot) => ({ date: snapshot.date, value: toNumber(snapshot.closes[symbol]), source: "history" }));
-  const currentDate = state.marketDataDate || priceDates.at(-1);
-  const current = latestPrice(symbol);
-  if (currentDate && current > 0) points.push({ date: currentDate, value: current, source: "current" });
-
-  return [...new Map(points.sort((a, b) => a.date.localeCompare(b.date)).map((point) => [point.date, point])).values()];
+  return marketPriceSeries(symbol);
 }
 
 function closeFromSnapshot(symbol, point) {
@@ -1285,22 +1318,24 @@ function closeFromSnapshot(symbol, point) {
 }
 
 function portfolioSnapshotSeries(symbolMode = "real") {
-  const snapshots = Object.values(marketHistoryPeriods)
-    .filter((snapshot) => snapshot?.date)
-    .map((snapshot) => ({ date: snapshot.date, source: "history", closes: snapshot.closes || {} }));
-  const currentDate = state.marketDataDate || priceDates.at(-1);
-  if (currentDate) snapshots.push({ date: currentDate, source: "current", closes: {} });
+  const dates = [
+    ...new Set(
+      trades
+        .flatMap((trade) => marketPriceSeries(symbolMode === "real" ? trade.symbol : symbolMode).map((point) => point.date))
+        .filter((date) => trades.some((trade) => trade.date <= date)),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
 
-  return [...new Map(snapshots.sort((a, b) => a.date.localeCompare(b.date)).map((point) => [point.date, point])).values()]
-    .map((point) => {
+  return dates
+    .map((date) => {
       const value = trades.reduce((sum, trade) => {
-        if (trade.date > point.date) return sum;
+        if (trade.date > date) return sum;
         const symbol = symbolMode === "real" ? trade.symbol : symbolMode;
-        const price = closeFromSnapshot(symbol, point);
+        const price = priceOnOrBefore(symbol, date);
         if (!(price > 0)) return sum;
         return sum + sharesFor(trade, symbol) * price;
       }, 0);
-      return { date: point.date, value };
+      return { date, value };
     })
     .filter((point) => point.value > 0);
 }
@@ -1321,7 +1356,7 @@ function investedAmountFor(trade) {
 function summarizePortfolio() {
   const totalInvested = trades.reduce((sum, trade) => sum + investedAmountFor(trade), 0);
   const currentValue = trades.reduce((sum, trade) => sum + currentValueFor(trade), 0);
-  const series = buildEquitySeries("real");
+  const series = buildScenarioEquitySeries("real");
   return {
     totalInvested,
     currentValue,
@@ -1343,14 +1378,18 @@ function syncPortfolioWeightsFromInputs() {
 
 function buildWeightedPortfolioSeries(amount) {
   const weights = portfolioWeights();
-  return priceDates.map((date, index) => {
+  const dates = [
+    ...new Set(weights.flatMap((item) => marketPriceSeries(item.symbol).map((point) => point.date))),
+  ].sort((a, b) => a.localeCompare(b));
+  return dates.map((date) => {
     const value = weights.reduce((sum, item) => {
-      const startPrice = priceAtIndex(item.symbol, 0);
-      const currentPrice = priceAtIndex(item.symbol, index);
+      const startPrice = priceOnOrBefore(item.symbol, dates[0]);
+      const currentPrice = priceOnOrBefore(item.symbol, date);
+      if (!(startPrice > 0) || !(currentPrice > 0)) return sum;
       return sum + amount * item.weight * (currentPrice / startPrice);
     }, 0);
     return { date, value };
-  });
+  }).filter((point) => point.value > 0);
 }
 
 function buildDcaSeries(symbol = state.dcaSymbols[0], startDate = state.dcaStartDate, endDate = state.dcaEndDate) {
@@ -1829,7 +1868,7 @@ async function renderScenarioRanking() {
     return;
   }
 
-  $("#scenarioRanking").innerHTML = `<div class="rank-row"><strong>正在重算替代結果</strong><small>使用每筆交易日期的還原日線買入價，而不是範例價格序列。</small></div>`;
+  $("#scenarioRanking").innerHTML = `<div class="rank-row"><strong>正在重算替代結果</strong><small>使用每筆交易日期的每日收盤價買入，而不是範例價格序列。</small></div>`;
   const rows = await mapWithConcurrency(visibleSymbols(), 4, async (symbol) => ({ symbol, ...(await scenarioTotals(symbol)) }));
   if (token !== scenarioRenderToken) return;
 
@@ -1934,7 +1973,7 @@ async function renderSingleTradeAnalysis() {
       const basis =
         item.symbol === trade.symbol
           ? `你的買入價 ${item.entryPrice.toFixed(2)}`
-          : `${item.entryDate} ${item.entrySource === "adjusted" ? "還原收盤" : "原始收盤"} ${item.entryPrice.toFixed(2)}`;
+          : `${item.entryDate} ${item.entrySource === "close" ? "收盤價" : "原始收盤"} ${item.entryPrice.toFixed(2)}`;
       return `
         <div class="analysis-card">
           <span>${isReal}</span>
@@ -1991,12 +2030,14 @@ async function renderCompareEngine() {
 
   const rows = state.compareSymbols
     .map((symbol) => {
-      const startPrice = compareClose(symbol, startSnapshot);
-      const endPrice = compareClose(symbol, endSnapshot);
+      const startPoint = comparePricePoint(symbol, startTarget, startSnapshot);
+      const endPoint = comparePricePoint(symbol, endTarget, endSnapshot);
+      const startPrice = toNumber(startPoint?.value);
+      const endPrice = toNumber(endPoint?.value);
       return {
         symbol,
-        startDate: startSnapshot.date,
-        endDate: endSnapshot.date,
+        startDate: startPoint?.date || startSnapshot.date,
+        endDate: endPoint?.date || endSnapshot.date,
         startPrice,
         endPrice,
         returnRate: startPrice > 0 && endPrice > 0 ? endPrice / startPrice - 1 : null,
@@ -2045,7 +2086,7 @@ async function renderDcaEngine() {
   const schedule = buildDcaInstallments(state.dcaStartDate, state.dcaEndDate, state.dcaFrequency);
   const scheduledCount = schedule.length;
   $("#dcaBasis").textContent =
-    `正在取得 ${state.dcaStartDate} 到 ${state.dcaEndDate} 的還原日線，依每期投入金額計算股數與 XIRR 年化...`;
+    `正在取得 ${state.dcaStartDate} 到 ${state.dcaEndDate} 的每日收盤價，依每期投入金額計算股數與 XIRR 年化...`;
   $("#dcaInvested").textContent = "--";
   $("#dcaValue").textContent = "--";
   $("#dcaReturn").textContent = "--";
@@ -2073,7 +2114,7 @@ async function renderDcaEngine() {
   $("#dcaBasis").textContent =
     `模擬區間：${state.dcaStartDate} 到 ${state.dcaEndDate}。` +
     `規則：${state.dcaFrequency === "weekly" ? "每週" : "每月"}投入 ${currency.format(state.dcaAmount)}，共 ${scheduledCount} 期。` +
-    "排定日若非交易日，使用往前最近交易日還原收盤價買入；總報酬 = 總資產 / 累積投入 - 1，年化 = 每期現金流 XIRR。";
+    "排定日若非交易日，使用往前最近交易日收盤價買入；總報酬 = 總資產 / 累積投入 - 1，年化 = 每期現金流 XIRR。";
   const rows = seriesBySymbol.map(({ symbol, series }) => {
     const last = series.at(-1) || { invested: 0, value: 0 };
     const rate = last.invested ? last.value / last.invested - 1 : 0;
@@ -2260,7 +2301,7 @@ function correlation(a, b) {
 }
 
 function renderCharts() {
-  const colors = ["#a15c07", "#2563eb", "#7c3aed", "#b42318", "#475569", "#15803d", "#0f766e", "#be185d"];
+  const colors = ["#a15c07", "#2563eb", "#7c3aed", "#b42318", "#475569", "#15803d", "#be185d", "#0891b2"];
   const alternatives = visibleSymbols()
     .map((symbol, index) => ({
       symbol,

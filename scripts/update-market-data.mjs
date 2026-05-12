@@ -86,7 +86,7 @@ const usSymbols = {
 };
 
 const requiredHistorySymbols = ["2330", "0050", "2454"];
-const dcaSeriesSymbols = [
+const taiwanDailySeriesSymbols = [
   "0050",
   "006208",
   "00631L",
@@ -98,12 +98,8 @@ const dcaSeriesSymbols = [
   "2330",
   "2454",
   "2881",
-  "AAPL",
-  "MSFT",
-  "NVDA",
-  "SPY",
-  "QQQ",
 ];
+const dcaSeriesSymbols = [...new Set([...taiwanDailySeriesSymbols, ...Object.keys(usSymbols)])];
 
 async function getJson(url) {
   const response = await fetch(url, { cache: "no-store" });
@@ -330,7 +326,7 @@ async function getYahooHistory(symbol, startDate, endDate) {
   return timestamps
     .map((timestamp, index) => ({
       date: taiwanDateFromTimestamp(timestamp),
-      value: toNumber(adjusted[index]) || toNumber(closes[index]),
+      value: toNumber(closes[index]) || toNumber(adjusted[index]),
     }))
     .filter((point) => point.date >= addDaysIso(startDate, -14) && point.date <= addDaysIso(endDate, 3) && point.value > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
