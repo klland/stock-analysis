@@ -1191,6 +1191,44 @@ function buildEquitySeries(symbolMode) {
   });
 }
 
+function marketSeriesPrice(symbol, date) {
+  const bundledPoint = pricePointOnOrBefore(marketDcaSeries[symbol]?.points || [], date);
+  if (bundledPoint?.value > 0 && bundledPoint.date <= date) return bundledPoint.value;
+  return priceOnOrBefore(symbol, date);
+}
+
+function entryPriceForScenarioSync(symbol, trade) {
+  if (symbol === trade.symbol && Number.isFinite(Number(trade.price))) return Number(trade.price);
+  const bundledPoint = pricePointOnOrBefore(marketDcaSeries[symbol]?.points || [], trade.date);
+  if (bundledPoint?.value > 0 && bundledPoint.date <= trade.date) return bundledPoint.value;
+  return entryPriceForTrade(trade, symbol);
+}
+
+function buildScenarioEquitySeries(symbolMode = "real") {
+  const dcaDates = Object.values(marketDcaSeries)
+    .flatMap((history) => (history.points || []).map((point) => point.date))
+    .filter((date) => trades.some((trade) => trade.date <= date));
+  const dates = [...new Set([...priceDates, ...Object.values(marketHistoryPeriods).map((snapshot) => snapshot.date).filter(Boolean), ...dcaDates, state.marketDataDate].filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+
+  return dates
+    .map((date) => {
+      const value = trades.reduce((sum, trade) => {
+        if (trade.date > date) return sum;
+        const symbol = symbolMode === "real" ? trade.symbol : symbolMode;
+        const entryPrice = entryPriceForScenarioSync(symbol, trade);
+        const currentPrice = marketSeriesPrice(symbol, date);
+        if (!(entryPrice > 0) || !(currentPrice > 0)) return sum;
+        const shares = symbolMode === "real" && symbol === trade.symbol && Number.isFinite(Number(trade.shares))
+          ? Number(trade.shares)
+          : investedAmountFor(trade) / entryPrice;
+        return sum + shares * currentPrice;
+      }, 0);
+      return { date, value };
+    })
+    .filter((point) => point.value > 0);
+}
+
 function returnsFromValues(series) {
   return series.slice(1).map((point, index) => {
     const previous = series[index].value;
@@ -2223,8 +2261,8 @@ function correlation(a, b) {
 
 function renderCharts() {
   drawLineChart($("#equityChart"), [
-    { series: buildEquitySeries("real"), color: "#0f766e" },
-    { series: buildEquitySeries(state.benchmark), color: "#a15c07" },
+    { series: buildScenarioEquitySeries("real"), color: "#0f766e" },
+    { series: buildScenarioEquitySeries(state.benchmark), color: "#a15c07" },
   ]);
 }
 
