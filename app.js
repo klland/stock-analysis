@@ -2260,10 +2260,26 @@ function correlation(a, b) {
 }
 
 function renderCharts() {
+  const colors = ["#a15c07", "#2563eb", "#7c3aed", "#b42318", "#475569", "#15803d", "#0f766e", "#be185d"];
+  const alternatives = visibleSymbols()
+    .map((symbol, index) => ({
+      symbol,
+      label: `${symbol} ${stocks[symbol].name}`,
+      color: colors[index % colors.length],
+      series: buildScenarioEquitySeries(symbol),
+    }))
+    .filter((item) => item.series.length);
+  const real = { label: "真實投資", color: "#0f766e", series: buildScenarioEquitySeries("real") };
   drawLineChart($("#equityChart"), [
-    { series: buildScenarioEquitySeries("real"), color: "#0f766e" },
-    { series: buildScenarioEquitySeries(state.benchmark), color: "#a15c07" },
+    ...(real.series.length ? [real] : []),
+    ...alternatives.map((item) => ({ series: item.series, color: item.color })),
   ]);
+  $("#equityLegend").innerHTML = [
+    ...(real.series.length ? [{ label: real.label, color: real.color }] : []),
+    ...alternatives.map((item) => ({ label: item.label, color: item.color })),
+  ]
+    .map((item) => `<span><i style="background:${item.color}"></i>${item.label}</span>`)
+    .join("");
 }
 
 function render() {

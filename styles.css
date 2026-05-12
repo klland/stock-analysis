@@ -249,9 +249,15 @@ canvas {
 
 .legend {
   display: flex;
+  flex-wrap: wrap;
   gap: 1rem;
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.legend span {
+  display: inline-flex;
+  align-items: center;
 }
 
 .legend i {
