@@ -286,6 +286,41 @@ canvas {
   border-radius: 8px;
 }
 
+.dca-result-row {
+  grid-template-columns: minmax(0, 1fr) minmax(190px, auto);
+  gap: 1rem;
+}
+
+.dca-result-row strong {
+  display: block;
+  line-height: 1.25;
+}
+
+.dca-result-row small {
+  display: block;
+  margin-top: 0.25rem;
+  line-height: 1.45;
+}
+
+.dca-result-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(72px, auto));
+  gap: 0.1rem 0.85rem;
+  justify-items: end;
+  text-align: right;
+}
+
+.dca-result-metrics span {
+  font-size: 1.05rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.dca-result-metrics small {
+  margin-top: 0;
+  font-size: 0.72rem;
+}
+
 .rank-row small,
 .trade-form label,
 .method span,
@@ -675,8 +710,14 @@ code {
   }
 
   .compare-custom-fields,
-  .compare-breakdown div {
+  .compare-breakdown div,
+  .dca-result-row {
     grid-template-columns: 1fr;
+  }
+
+  .dca-result-metrics {
+    justify-items: start;
+    text-align: left;
   }
 
   .compare-custom-fields {

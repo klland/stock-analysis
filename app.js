@@ -750,7 +750,7 @@ function applyTwseMarketData(payload) {
   });
 
   state.marketDataSource = "twse";
-  state.marketDataDate = payload.date || payload.fetchedAt.slice(0, 10);
+  state.marketDataDate = payload.history?.latestDate || (String(payload.date || "").includes("-") ? payload.date : rocDateToIso(payload.date)) || payload.fetchedAt.slice(0, 10);
   if (state.marketDataDate) {
     const previousLastDate = priceDates.at(-1);
     priceDates[priceDates.length - 1] = state.marketDataDate;
@@ -1526,9 +1526,13 @@ function continuityScore(symbol) {
   return Math.round(returns.reduce((sum, value) => sum + Math.max(0, Math.min(1, value + 0.15)), 0) * (100 / returns.length));
 }
 
-function drawLineChart(canvas, seriesList, formatter = currency) {
+function drawLineChart(canvas, seriesList, formatter = currency, options = {}) {
   const ctx = canvas.getContext("2d");
   const values = seriesList.flatMap((item) => item.series.map((point) => point.value));
+  const dateValues = seriesList
+    .flatMap((item) => item.series.map((point) => point.date))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
   if (values.length === 0) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "#fbfcfb";
@@ -1539,6 +1543,11 @@ function drawLineChart(canvas, seriesList, formatter = currency) {
     return;
   }
   const max = Math.max(...values, 1) * 1.08;
+  const startDate = options.startDate || dateValues[0] || "";
+  const endDate = options.endDate || dateValues.at(-1) || "";
+  const startTime = startDate ? new Date(`${startDate}T00:00:00Z`).getTime() : 0;
+  const endTime = endDate ? new Date(`${endDate}T00:00:00Z`).getTime() : startTime;
+  const rangeTime = Math.max(1, endTime - startTime);
   const padding = { top: 24, right: 26, bottom: 38, left: 70 };
   const width = canvas.width - padding.left - padding.right;
   const height = canvas.height - padding.top - padding.bottom;
@@ -1565,7 +1574,9 @@ function drawLineChart(canvas, seriesList, formatter = currency) {
     ctx.lineWidth = 3;
     ctx.beginPath();
     series.forEach((point, index) => {
-      const x = padding.left + width * (index / Math.max(1, series.length - 1));
+      const pointTime = new Date(`${point.date}T00:00:00Z`).getTime();
+      const clampedTime = Math.max(startTime, Math.min(endTime, pointTime));
+      const x = padding.left + width * ((clampedTime - startTime) / rangeTime);
       const y = padding.top + height * (1 - point.value / max);
       if (index === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
@@ -1574,8 +1585,8 @@ function drawLineChart(canvas, seriesList, formatter = currency) {
   });
 
   ctx.fillStyle = "#667068";
-  ctx.fillText(priceDates[0], padding.left, canvas.height - 14);
-  ctx.fillText(priceDates.at(-1), canvas.width - padding.right - 88, canvas.height - 14);
+  ctx.fillText(startDate, padding.left, canvas.height - 14);
+  ctx.fillText(endDate, canvas.width - padding.right - 88, canvas.height - 14);
 }
 
 function drawBarChart(canvas, rows) {
@@ -1974,8 +1985,8 @@ async function renderDcaEngine() {
   }
 
   $("#dcaBasis").textContent =
-    `計算基準：${state.dcaFrequency === "weekly" ? "每週" : "每月"}從開始日投入一次，` +
-    `每期 ${currency.format(state.dcaAmount)}，共 ${scheduledCount} 期。` +
+    `模擬區間：${state.dcaStartDate} 到 ${state.dcaEndDate}。` +
+    `規則：${state.dcaFrequency === "weekly" ? "每週" : "每月"}投入 ${currency.format(state.dcaAmount)}，共 ${scheduledCount} 期。` +
     "排定日若非交易日，使用往前最近交易日還原收盤價買入；總報酬 = 總資產 / 累積投入 - 1，年化 = 每期現金流 XIRR。";
   const rows = seriesBySymbol.map(({ symbol, series }) => {
     const last = series.at(-1) || { invested: 0, value: 0 };
@@ -2010,7 +2021,7 @@ async function renderDcaEngine() {
   drawLineChart($("#dcaChart"), [
     ...(primary.length ? [{ series: primary.map((point) => ({ date: point.date, value: point.invested })), color: "#667068" }] : []),
     ...validRows.map((item, index) => ({ series: item.series, color: colors[index % colors.length] })),
-  ]);
+  ], currency, { startDate: state.dcaStartDate, endDate: state.dcaEndDate });
   $("#dcaLegend").innerHTML = [
     ...(primary.length ? [{ label: "累積投入", color: "#667068" }] : []),
     ...validRows.map((item, index) => ({
@@ -2043,12 +2054,17 @@ async function renderDcaEngine() {
         `;
       }
       return `
-        <div class="rank-row">
+        <div class="rank-row dca-result-row">
           <div>
             <strong>${symbol} ${stocks[symbol].name}</strong>
-            <small>${state.dcaStartDate} 到 ${state.dcaEndDate}，${installments.length} 期，累積投入 ${currency.format(last.invested)}，總資產 ${currency.format(last.value)}</small>
+            <small>${installments.length} 期 · 累積投入 ${currency.format(last.invested)} · 總資產 ${currency.format(last.value)}</small>
           </div>
-          <strong class="${classForReturn(rate)}">${percent.format(rate)} / ${metricValue(annualized)}</strong>
+          <div class="dca-result-metrics">
+            <span class="${classForReturn(rate)}">${percent.format(rate)}</span>
+            <small>總報酬</small>
+            <span class="${classForReturn(annualized)}">${metricValue(annualized)}</span>
+            <small>年化</small>
+          </div>
         </div>
       `;
     })
