@@ -137,6 +137,7 @@ let userStateLoaded = false;
 let singleTradeRenderToken = 0;
 let compareRenderToken = 0;
 let dcaRenderToken = 0;
+let scenarioRenderToken = 0;
 
 const sectorNames = {
   "01": "水泥",
@@ -1106,6 +1107,45 @@ function hypotheticalTradeResult(trade, symbol, entryPoint) {
   };
 }
 
+async function entryPointForScenario(symbol, targetDate) {
+  const bundledPoint = pricePointOnOrBefore(marketDcaSeries[symbol]?.points || [], targetDate);
+  if (bundledPoint?.value > 0 && bundledPoint.date <= targetDate) return { date: bundledPoint.date, value: bundledPoint.value, source: "adjusted" };
+  try {
+    const adjusted = await adjustedCloseOnOrBefore(symbol, targetDate);
+    if (adjusted?.value > 0) return adjusted;
+  } catch (error) {
+    console.warn(`Scenario adjusted close unavailable for ${symbol}: ${error.message}`);
+  }
+  return null;
+}
+
+async function scenarioTotals(symbol) {
+  let invested = 0;
+  let value = 0;
+  let countedTrades = 0;
+
+  for (const trade of trades) {
+    const amount = investedAmountFor(trade);
+    if (!(amount > 0)) continue;
+
+    if (symbol === trade.symbol && Number.isFinite(Number(trade.shares))) {
+      invested += amount;
+      value += Number(trade.shares) * latestPrice(symbol);
+      countedTrades += 1;
+      continue;
+    }
+
+    const entryPoint = await entryPointForScenario(symbol, trade.date);
+    const entryPrice = toNumber(entryPoint?.value);
+    if (!(entryPrice > 0)) continue;
+    invested += amount;
+    value += (amount / entryPrice) * latestPrice(symbol);
+    countedTrades += 1;
+  }
+
+  return { invested, value, countedTrades, missingTrades: trades.length - countedTrades, returnRate: invested ? value / invested - 1 : null };
+}
+
 function actualTradeResult(trade) {
   const invested = investedAmountFor(trade);
   const entryPrice = entryPriceForTrade(trade);
@@ -1122,6 +1162,8 @@ function actualTradeResult(trade) {
 }
 
 async function entryPointForHypothetical(symbol, targetDate, snapshot) {
+  const bundledPoint = pricePointOnOrBefore(marketDcaSeries[symbol]?.points || [], targetDate);
+  if (bundledPoint?.value > 0 && bundledPoint.date <= targetDate) return { date: bundledPoint.date, value: bundledPoint.value, source: "adjusted" };
   try {
     const adjusted = await adjustedCloseOnOrBefore(symbol, targetDate);
     if (adjusted?.value > 0) return adjusted;
@@ -1248,12 +1290,6 @@ function summarizePortfolio() {
     totalReturn: totalInvested ? currentValue / totalInvested - 1 : 0,
     drawdown: maxDrawdown(series),
   };
-}
-
-function scenarioTotals(symbol) {
-  const invested = trades.reduce((sum, trade) => sum + investedAmountFor(trade), 0);
-  const value = trades.reduce((sum, trade) => sum + currentValueFor(trade, symbol), 0);
-  return { invested, value, returnRate: invested ? value / invested - 1 : 0 };
 }
 
 function portfolioWeights() {
@@ -1747,29 +1783,41 @@ function renderMetrics() {
   $("#maxDrawdown").className = "return-negative";
 }
 
-function renderScenarioRanking() {
+async function renderScenarioRanking() {
+  const token = ++scenarioRenderToken;
   if (trades.length === 0) {
     $("#scenarioRanking").innerHTML =
       `<div class="rank-row"><strong>尚未有交易</strong><small>新增一筆真實交易後，就能比較同日期同金額買其他標的的結果。</small></div>`;
     return;
   }
 
-  $("#scenarioRanking").innerHTML = visibleSymbols()
-    .map((symbol) => ({ symbol, ...scenarioTotals(symbol) }))
-    .sort((a, b) => b.returnRate - a.returnRate)
+  $("#scenarioRanking").innerHTML = `<div class="rank-row"><strong>正在重算替代結果</strong><small>使用每筆交易日期的還原日線買入價，而不是範例價格序列。</small></div>`;
+  const rows = await mapWithConcurrency(visibleSymbols(), 4, async (symbol) => ({ symbol, ...(await scenarioTotals(symbol)) }));
+  if (token !== scenarioRenderToken) return;
+
+  $("#scenarioRanking").innerHTML = rows
+    .filter((item) => item.countedTrades > 0)
+    .sort((a, b) => {
+      if (a.missingTrades && !b.missingTrades) return 1;
+      if (!a.missingTrades && b.missingTrades) return -1;
+      return (Number.isFinite(b.returnRate) ? b.returnRate : -Infinity) - (Number.isFinite(a.returnRate) ? a.returnRate : -Infinity);
+    })
     .map((item) => {
       const stock = stocks[item.symbol];
+      const complete = item.missingTrades === 0 && Number.isFinite(item.returnRate);
       return `
         <div class="rank-row">
           <div>
             <strong>${item.symbol} ${stock.name}</strong>
-            <small>同日期同金額買入，目前 ${currency.format(item.value)}</small>
+            <small>${complete
+              ? `${item.countedTrades} 筆交易同日期同金額買入，目前 ${currency.format(item.value)}`
+              : `只有 ${item.countedTrades}/${trades.length} 筆交易日期有日線，先不列入完整比較`}</small>
           </div>
-          <strong class="${classForReturn(item.returnRate)}">${percent.format(item.returnRate)}</strong>
+          <strong class="${classForReturn(complete ? item.returnRate : NaN)}">${complete ? percent.format(item.returnRate) : "--"}</strong>
         </div>
       `;
     })
-    .join("");
+    .join("") || `<div class="rank-row"><strong>沒有可用替代結果</strong><small>這些交易日期沒有抓到可用日線。</small><strong>--</strong></div>`;
 }
 
 function renderTrades() {
