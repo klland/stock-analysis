@@ -327,6 +327,43 @@ canvas {
   font-size: 0.72rem;
 }
 
+.conditional-result-row {
+  align-items: start;
+}
+
+.conditional-result-main {
+  min-width: 0;
+}
+
+.trigger-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.45rem;
+  margin-top: 0.7rem;
+}
+
+.trigger-item {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.15rem 0.55rem;
+  align-items: baseline;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfcfb;
+}
+
+.trigger-item span,
+.trigger-item b {
+  font-weight: 800;
+}
+
+.trigger-item small {
+  grid-column: 1 / -1;
+  margin-top: 0;
+  font-size: 0.78rem;
+}
+
 .rank-row small,
 .trade-form label,
 .method span,

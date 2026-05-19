@@ -2469,19 +2469,29 @@ function renderConditionalEngine() {
           </div>
         `;
       }
-      const triggerText = row.triggers
-        .slice(0, 4)
-        .map((trade) => `${trade.date} ${percent.format(trade.dailyReturn)} @ ${trade.close.toFixed(2)}`)
-        .join("、");
+      const visibleTriggers = row.triggers.slice(0, 8);
       return `
-        <div class="rank-row dca-result-row">
-          <div>
+        <div class="rank-row dca-result-row conditional-result-row">
+          <div class="conditional-result-main">
             <strong>${row.symbol} ${stocks[row.symbol].name}</strong>
             <small>
               區間漲跌 ${metricValue(row.periodReturn)} · 觸發 ${row.triggers.length} 次 ·
               最大單日漲 ${metricValue(row.bestDay?.value)} · 最大單日跌 ${metricValue(row.worstDay?.value)}
             </small>
-            <small>${triggerText}${row.triggers.length > 4 ? " ..." : ""}</small>
+            <div class="trigger-list" aria-label="${row.symbol} 觸發買入日期">
+              ${visibleTriggers
+                .map(
+                  (trade) => `
+                    <div class="trigger-item">
+                      <span>${trade.date}</span>
+                      <b class="${classForReturn(trade.dailyReturn)}">${percent.format(trade.dailyReturn)}</b>
+                      <small>收盤 ${trade.close.toFixed(2)} · 投入 ${currency.format(trade.amount)}</small>
+                    </div>
+                  `,
+                )
+                .join("")}
+            </div>
+            ${row.triggers.length > visibleTriggers.length ? `<small>還有 ${row.triggers.length - visibleTriggers.length} 次未列出</small>` : ""}
           </div>
           <div class="dca-result-metrics">
             <span class="${classForReturn(row.returnRate)}">${percent.format(row.returnRate)}</span>
