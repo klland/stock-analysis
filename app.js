@@ -114,6 +114,12 @@ const state = {
   dcaAmount: 10000,
   dcaStartDate: "2024-01-15",
   dcaEndDate: "2026-05-01",
+  conditionalSymbols: ["2330"],
+  conditionalMode: "drop",
+  conditionalThreshold: 3,
+  conditionalAmount: 10000,
+  conditionalStartDate: "2024-01-15",
+  conditionalEndDate: "2026-05-01",
   riskSymbol: "2330",
   marketDataSource: "sample",
   marketDataDate: "",
@@ -307,13 +313,15 @@ function loadUserState() {
     const saved = JSON.parse(localStorage.getItem(USER_STATE_KEY) || "null");
     if (!saved) return;
     if (Array.isArray(saved.trades)) trades = saved.trades.filter((trade) => trade.id && stocks[trade.symbol]);
-    ["watchlist", "portfolioSymbols", "compareSymbols", "dcaSymbols"].forEach((key) => {
+    ["watchlist", "portfolioSymbols", "compareSymbols", "dcaSymbols", "conditionalSymbols"].forEach((key) => {
       if (Array.isArray(saved[key])) state[key] = uniqueSymbols(saved[key]);
     });
-    ["benchmark", "riskSymbol", "comparePeriod", "compareStartDate", "compareEndDate", "rankingPeriod", "sector", "dcaFrequency", "dcaStartDate", "dcaEndDate"].forEach((key) => {
+    ["benchmark", "riskSymbol", "comparePeriod", "compareStartDate", "compareEndDate", "rankingPeriod", "sector", "dcaFrequency", "dcaStartDate", "dcaEndDate", "conditionalMode", "conditionalStartDate", "conditionalEndDate"].forEach((key) => {
       if (saved[key]) state[key] = saved[key];
     });
     if (Number.isFinite(Number(saved.dcaAmount))) state.dcaAmount = Number(saved.dcaAmount);
+    if (Number.isFinite(Number(saved.conditionalAmount))) state.conditionalAmount = Number(saved.conditionalAmount);
+    if (Number.isFinite(Number(saved.conditionalThreshold))) state.conditionalThreshold = Number(saved.conditionalThreshold);
     if (Number.isFinite(Number(saved.portfolioAmount))) state.portfolioAmount = Number(saved.portfolioAmount);
     if (saved.portfolioWeights && typeof saved.portfolioWeights === "object") state.portfolioWeights = saved.portfolioWeights;
     if (saved.selectedTradeId) state.selectedTradeId = saved.selectedTradeId;
@@ -338,6 +346,7 @@ function saveUserState() {
         portfolioWeights: state.portfolioWeights,
         compareSymbols: state.compareSymbols,
         dcaSymbols: state.dcaSymbols,
+        conditionalSymbols: state.conditionalSymbols,
         benchmark: state.benchmark,
         selectedTradeId: state.selectedTradeId,
         comparePeriod: state.comparePeriod,
@@ -349,6 +358,11 @@ function saveUserState() {
         dcaAmount: state.dcaAmount,
         dcaStartDate: state.dcaStartDate,
         dcaEndDate: state.dcaEndDate,
+        conditionalMode: state.conditionalMode,
+        conditionalThreshold: state.conditionalThreshold,
+        conditionalAmount: state.conditionalAmount,
+        conditionalStartDate: state.conditionalStartDate,
+        conditionalEndDate: state.conditionalEndDate,
         riskSymbol: state.riskSymbol,
       }),
     );
@@ -370,6 +384,7 @@ function syncSelections() {
   state.compareSymbols = uniqueSymbols(state.compareSymbols.filter((symbol) => list.includes(symbol)));
   state.portfolioSymbols = uniqueSymbols(state.portfolioSymbols.filter((symbol) => list.includes(symbol)));
   state.dcaSymbols = uniqueSymbols(state.dcaSymbols.filter((symbol) => list.includes(symbol)));
+  state.conditionalSymbols = uniqueSymbols(state.conditionalSymbols.filter((symbol) => list.includes(symbol)));
 }
 
 function readCache() {
@@ -1576,6 +1591,74 @@ async function buildRealDcaSeries(symbol = state.dcaSymbols[0], startDate = stat
   }
 }
 
+function conditionalModeText() {
+  return state.conditionalMode === "rise" ? "單日上漲" : "單日下跌";
+}
+
+function conditionalTriggered(dailyReturn) {
+  const threshold = Math.max(0, Number(state.conditionalThreshold) || 0) / 100;
+  return state.conditionalMode === "rise" ? dailyReturn >= threshold : dailyReturn <= -threshold;
+}
+
+function buildConditionalStrategy(symbol) {
+  const points = marketPriceSeries(symbol)
+    .filter((point) => point.date >= state.conditionalStartDate && point.date <= state.conditionalEndDate)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (points.length < 2) {
+    return { symbol, points, series: [], triggers: [], dailyReturns: [], error: "這段時間沒有足夠日線資料" };
+  }
+
+  let invested = 0;
+  let shares = 0;
+  const amount = Math.max(0, Number(state.conditionalAmount) || 0);
+  const triggers = [];
+  const series = [];
+  const dailyReturns = [];
+  const cashflows = [];
+
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const point = points[index];
+    const dailyReturn = previous.value > 0 ? point.value / previous.value - 1 : 0;
+    dailyReturns.push({ date: point.date, value: dailyReturn, close: point.value });
+    if (amount > 0 && conditionalTriggered(dailyReturn)) {
+      const boughtShares = amount / point.value;
+      invested += amount;
+      shares += boughtShares;
+      cashflows.push({ date: point.date, amount: -amount });
+      triggers.push({
+        date: point.date,
+        close: point.value,
+        dailyReturn,
+        amount,
+        shares: boughtShares,
+      });
+    }
+    if (invested > 0) series.push({ date: point.date, invested, value: shares * point.value });
+  }
+
+  const last = series.at(-1) || { date: points.at(-1).date, invested: 0, value: 0 };
+  if (last.value > 0) cashflows.push({ date: last.date, amount: last.value });
+  const periodReturn = points[0].value > 0 ? points.at(-1).value / points[0].value - 1 : NaN;
+  const bestDay = dailyReturns.reduce((best, item) => (item.value > best.value ? item : best), dailyReturns[0]);
+  const worstDay = dailyReturns.reduce((worst, item) => (item.value < worst.value ? item : worst), dailyReturns[0]);
+  return {
+    symbol,
+    points,
+    series,
+    triggers,
+    dailyReturns,
+    cashflows,
+    last,
+    periodReturn,
+    bestDay,
+    worstDay,
+    returnRate: last.invested > 0 ? last.value / last.invested - 1 : NaN,
+    annualized: xirr(cashflows),
+    error: triggers.length ? "" : "這段期間沒有觸發買入",
+  };
+}
+
 async function dcaSnapshotRequests(schedule, endDate) {
   const requests = [
     ...schedule.map((date) => ({ kind: "installment", targetDate: date })),
@@ -1854,6 +1937,19 @@ function renderDcaList() {
     .join("");
 }
 
+function renderConditionalList() {
+  $("#conditionalChips").innerHTML = state.conditionalSymbols
+    .map(
+      (symbol) => `
+        <span class="selected-chip">
+          ${symbol} ${stocks[symbol].name}
+          <button type="button" aria-label="刪除 ${symbol}" data-remove-conditional="${symbol}">×</button>
+        </span>
+      `,
+    )
+    .join("");
+}
+
 function renderControls() {
   syncSelections();
   normalizeRankingPeriod();
@@ -1870,9 +1966,11 @@ function renderControls() {
   $("#portfolioAddSelect").innerHTML = optionHtml(list.filter((symbol) => !state.portfolioSymbols.includes(symbol)));
   $("#compareAddSelect").innerHTML = optionHtml(list.filter((symbol) => !state.compareSymbols.includes(symbol)));
   $("#dcaAddSelect").innerHTML = optionHtml(list.filter((symbol) => !state.dcaSymbols.includes(symbol)));
+  $("#conditionalAddSelect").innerHTML = optionHtml(list.filter((symbol) => !state.conditionalSymbols.includes(symbol)));
   $("#portfolioAddForm button").disabled = !$("#portfolioAddSelect").value;
   $("#compareAddForm button").disabled = !$("#compareAddSelect").value;
   $("#dcaAddForm button").disabled = !$("#dcaAddSelect").value;
+  $("#conditionalAddForm button").disabled = !$("#conditionalAddSelect").value;
   $("#benchmarkSelect").value = state.benchmark;
   $("#riskSymbol").value = state.riskSymbol;
   $("#symbolInput").value = list[0] || "2330";
@@ -1887,6 +1985,11 @@ function renderControls() {
   $("#rankingPeriod").value = state.rankingPeriod;
   $("#dcaStartDate").value = state.dcaStartDate;
   $("#dcaEndDate").value = state.dcaEndDate;
+  $("#conditionalMode").value = state.conditionalMode;
+  $("#conditionalThreshold").value = state.conditionalThreshold;
+  $("#conditionalAmount").value = state.conditionalAmount;
+  $("#conditionalStartDate").value = state.conditionalStartDate;
+  $("#conditionalEndDate").value = state.conditionalEndDate;
 
   const sectors = ["全部", ...new Set(Object.values(stocks).map((stock) => stock.sector).filter(Boolean))];
   $("#sectorFilter").innerHTML = sectors.map((sector) => `<option value="${sector}">${sector}</option>`).join("");
@@ -1895,6 +1998,7 @@ function renderControls() {
   renderWatchlist();
   renderCompareList();
   renderDcaList();
+  renderConditionalList();
 
   const defaultWeights = { "2330": 35, "0050": 35, "2454": 20, "2881": 10, "2317": 10 };
   let assignedWeight = 0;
@@ -2283,6 +2387,114 @@ async function renderDcaEngine() {
     .join("");
 }
 
+function renderConditionalEngine() {
+  if (state.conditionalStartDate > state.conditionalEndDate) {
+    $("#conditionalBasis").textContent = "日期區間錯誤：開始日期必須早於結束日期。";
+    $("#conditionalInvested").textContent = "--";
+    $("#conditionalValue").textContent = "--";
+    $("#conditionalReturn").textContent = "--";
+    $("#conditionalTrades").textContent = "--";
+    drawLineChart($("#conditionalChart"), []);
+    $("#conditionalLegend").innerHTML = "";
+    $("#conditionalResults").innerHTML = `<div class="rank-row"><strong>日期區間錯誤</strong><small>開始日期必須早於結束日期。</small></div>`;
+    return;
+  }
+
+  const threshold = Math.max(0, Number(state.conditionalThreshold) || 0);
+  const rows = state.conditionalSymbols.map(buildConditionalStrategy);
+  const validRows = rows.filter((row) => row.last?.invested > 0);
+  $("#conditionalBasis").textContent =
+    `模擬區間：${state.conditionalStartDate} 到 ${state.conditionalEndDate}。` +
+    `規則：每個交易日與前一交易日相比，${conditionalModeText()}達 ${threshold}% 時，以收盤價投入 ${currency.format(state.conditionalAmount)}。` +
+    "策略報酬 = 期末資產 / 累積投入 - 1。";
+
+  if (!state.conditionalSymbols.length) {
+    $("#conditionalInvested").textContent = "--";
+    $("#conditionalValue").textContent = "--";
+    $("#conditionalReturn").textContent = "--";
+    $("#conditionalTrades").textContent = "--";
+    drawLineChart($("#conditionalChart"), []);
+    $("#conditionalLegend").innerHTML = "";
+    $("#conditionalResults").innerHTML = `<div class="rank-row"><strong>尚未選擇標的</strong><small>先從你的公司股票清單加入一檔股票或 ETF。</small></div>`;
+    return;
+  }
+
+  if (!validRows.length) {
+    $("#conditionalInvested").textContent = "--";
+    $("#conditionalValue").textContent = "--";
+    $("#conditionalReturn").textContent = "--";
+    $("#conditionalTrades").textContent = "0";
+    drawLineChart($("#conditionalChart"), []);
+    $("#conditionalLegend").innerHTML = "";
+    $("#conditionalResults").innerHTML = rows
+      .map((row) => `<div class="rank-row"><strong>${row.symbol} ${stocks[row.symbol].name}</strong><small>${row.error || "沒有可用資料"}</small><strong>--</strong></div>`)
+      .join("");
+    return;
+  }
+
+  const best = [...validRows].sort((a, b) => b.returnRate - a.returnRate)[0];
+  $("#conditionalInvested").textContent = currency.format(best.last.invested);
+  $("#conditionalValue").textContent = `${best.symbol} ${currency.format(best.last.value)}`;
+  $("#conditionalReturn").textContent = `${percent.format(best.returnRate)} / ${metricValue(best.annualized)}`;
+  $("#conditionalReturn").className = classForReturn(best.returnRate);
+  $("#conditionalTrades").textContent = `${best.triggers.length} 次`;
+
+  const colors = ["#0f766e", "#a15c07", "#2563eb", "#7c3aed", "#b42318", "#475569", "#15803d"];
+  drawLineChart($("#conditionalChart"), [
+    { series: best.series.map((point) => ({ date: point.date, value: point.invested })), color: "#667068" },
+    ...validRows.map((row, index) => ({ series: row.series, color: colors[index % colors.length] })),
+  ], currency, { startDate: state.conditionalStartDate, endDate: state.conditionalEndDate });
+  $("#conditionalLegend").innerHTML = [
+    { label: "累積投入", color: "#667068" },
+    ...validRows.map((row, index) => ({ label: `${row.symbol} ${stocks[row.symbol].name}`, color: colors[index % colors.length] })),
+  ]
+    .map((item) => `<span><i style="background:${item.color}"></i>${item.label}</span>`)
+    .join("");
+
+  $("#conditionalResults").innerHTML = rows
+    .sort((a, b) => {
+      if (!Number.isFinite(a.returnRate) && Number.isFinite(b.returnRate)) return 1;
+      if (Number.isFinite(a.returnRate) && !Number.isFinite(b.returnRate)) return -1;
+      return (b.returnRate || -Infinity) - (a.returnRate || -Infinity);
+    })
+    .map((row) => {
+      if (!row.last?.invested) {
+        return `
+          <div class="rank-row">
+            <div>
+              <strong>${row.symbol} ${stocks[row.symbol].name}</strong>
+              <small>${row.error || "沒有可用資料"}</small>
+            </div>
+            <strong>--</strong>
+          </div>
+        `;
+      }
+      const triggerText = row.triggers
+        .slice(0, 4)
+        .map((trade) => `${trade.date} ${percent.format(trade.dailyReturn)} @ ${trade.close.toFixed(2)}`)
+        .join("、");
+      return `
+        <div class="rank-row dca-result-row">
+          <div>
+            <strong>${row.symbol} ${stocks[row.symbol].name}</strong>
+            <small>
+              區間漲跌 ${metricValue(row.periodReturn)} · 觸發 ${row.triggers.length} 次 ·
+              最大單日漲 ${metricValue(row.bestDay?.value)} · 最大單日跌 ${metricValue(row.worstDay?.value)}
+            </small>
+            <small>${triggerText}${row.triggers.length > 4 ? " ..." : ""}</small>
+          </div>
+          <div class="dca-result-metrics">
+            <span class="${classForReturn(row.returnRate)}">${percent.format(row.returnRate)}</span>
+            <small>策略報酬</small>
+            <span>${currency.format(row.last.value)}</span>
+            <small>期末資產</small>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function renderMarketRanking() {
   normalizeRankingPeriod();
   updateRankingPeriodOptions();
@@ -2416,6 +2628,7 @@ function render() {
   renderPortfolioEngine();
   renderCompareEngine();
   renderDcaEngine();
+  renderConditionalEngine();
   renderMarketRanking();
   renderRiskPosition();
   renderAdvancedMetrics();
@@ -2562,6 +2775,49 @@ function bindEvents() {
     saveUserState();
     renderControls();
     renderDcaEngine();
+  });
+
+  $("#conditionalMode").addEventListener("change", (event) => {
+    state.conditionalMode = event.target.value;
+    saveUserState();
+    renderConditionalEngine();
+  });
+  $("#conditionalThreshold").addEventListener("input", (event) => {
+    state.conditionalThreshold = Number(event.target.value) || 0;
+    saveUserState();
+    renderConditionalEngine();
+  });
+  $("#conditionalAmount").addEventListener("input", (event) => {
+    state.conditionalAmount = Number(event.target.value) || 0;
+    saveUserState();
+    renderConditionalEngine();
+  });
+  $("#conditionalStartDate").addEventListener("change", (event) => {
+    state.conditionalStartDate = event.target.value || priceDates[0];
+    saveUserState();
+    renderConditionalEngine();
+  });
+  $("#conditionalEndDate").addEventListener("change", (event) => {
+    state.conditionalEndDate = event.target.value || priceDates.at(-1);
+    saveUserState();
+    renderConditionalEngine();
+  });
+  $("#conditionalAddForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const symbol = $("#conditionalAddSelect").value;
+    if (!symbol) return;
+    state.conditionalSymbols = uniqueSymbols([...state.conditionalSymbols, symbol]);
+    saveUserState();
+    renderControls();
+    renderConditionalEngine();
+  });
+  $("#conditionalChips").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-remove-conditional]");
+    if (!button) return;
+    state.conditionalSymbols = state.conditionalSymbols.filter((symbol) => symbol !== button.dataset.removeConditional);
+    saveUserState();
+    renderControls();
+    renderConditionalEngine();
   });
 
   $("#rankingPeriod").addEventListener("change", (event) => {
