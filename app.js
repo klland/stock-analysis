@@ -2432,20 +2432,35 @@ function renderConditionalEngine() {
     return;
   }
 
-  const best = [...validRows].sort((a, b) => b.returnRate - a.returnRate)[0];
-  $("#conditionalInvested").textContent = currency.format(best.last.invested);
-  $("#conditionalValue").textContent = `${best.symbol} ${currency.format(best.last.value)}`;
-  $("#conditionalReturn").textContent = `${percent.format(best.returnRate)} / ${metricValue(best.annualized)}`;
-  $("#conditionalReturn").className = classForReturn(best.returnRate);
-  $("#conditionalTrades").textContent = `${best.triggers.length} 次`;
+  const totals = validRows.reduce(
+    (sum, row) => ({
+      invested: sum.invested + row.last.invested,
+      value: sum.value + row.last.value,
+      triggers: sum.triggers + row.triggers.length,
+    }),
+    { invested: 0, value: 0, triggers: 0 },
+  );
+  const totalReturn = totals.invested > 0 ? totals.value / totals.invested - 1 : NaN;
+  $("#conditionalInvested").textContent = currency.format(totals.invested);
+  $("#conditionalValue").textContent = currency.format(totals.value);
+  $("#conditionalReturn").textContent = percent.format(totalReturn);
+  $("#conditionalReturn").className = classForReturn(totalReturn);
+  $("#conditionalTrades").textContent = `${totals.triggers} 次`;
 
   const colors = ["#0f766e", "#a15c07", "#2563eb", "#7c3aed", "#b42318", "#475569", "#15803d"];
+  const allDates = [
+    ...new Set(validRows.flatMap((row) => row.series.map((point) => point.date))),
+  ].sort((a, b) => a.localeCompare(b));
+  const totalInvestedSeries = allDates.map((date) => ({
+    date,
+    value: validRows.reduce((sum, row) => sum + (pricePointOnOrBefore(row.series, date)?.invested || 0), 0),
+  })).filter((point) => point.value > 0);
   drawLineChart($("#conditionalChart"), [
-    { series: best.series.map((point) => ({ date: point.date, value: point.invested })), color: "#667068" },
+    { series: totalInvestedSeries, color: "#667068" },
     ...validRows.map((row, index) => ({ series: row.series, color: colors[index % colors.length] })),
   ], currency, { startDate: state.conditionalStartDate, endDate: state.conditionalEndDate });
   $("#conditionalLegend").innerHTML = [
-    { label: "累積投入", color: "#667068" },
+    { label: "合計累積投入", color: "#667068" },
     ...validRows.map((row, index) => ({ label: `${row.symbol} ${stocks[row.symbol].name}`, color: colors[index % colors.length] })),
   ]
     .map((item) => `<span><i style="background:${item.color}"></i>${item.label}</span>`)
@@ -2475,7 +2490,10 @@ function renderConditionalEngine() {
           <div class="conditional-result-main">
             <strong>${row.symbol} ${stocks[row.symbol].name}</strong>
             <small>
-              區間漲跌 ${metricValue(row.periodReturn)} · 觸發 ${row.triggers.length} 次 ·
+              單檔投入 ${currency.format(row.last.invested)} · 單檔資產 ${currency.format(row.last.value)} ·
+              區間漲跌 ${metricValue(row.periodReturn)} · 觸發 ${row.triggers.length} 次
+            </small>
+            <small>
               最大單日漲 ${metricValue(row.bestDay?.value)} · 最大單日跌 ${metricValue(row.worstDay?.value)}
             </small>
             <div class="trigger-list" aria-label="${row.symbol} 觸發買入日期">
@@ -2495,9 +2513,9 @@ function renderConditionalEngine() {
           </div>
           <div class="dca-result-metrics">
             <span class="${classForReturn(row.returnRate)}">${percent.format(row.returnRate)}</span>
-            <small>策略報酬</small>
+            <small>單檔報酬</small>
             <span>${currency.format(row.last.value)}</span>
-            <small>期末資產</small>
+            <small>單檔資產</small>
           </div>
         </div>
       `;
