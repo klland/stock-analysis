@@ -11,6 +11,7 @@ const endpoints = {
   tpexDaily: "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=EW&o=data",
   twseHistory: "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
   tpexHistory: "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php",
+  finmindData: "https://api.finmindtrade.com/api/v4/data",
 };
 
 const usSymbols = {
@@ -100,6 +101,7 @@ const taiwanDailySeriesSymbols = [
   "2881",
 ];
 const dcaSeriesSymbols = [...new Set([...taiwanDailySeriesSymbols, ...Object.keys(usSymbols)])];
+const taiwanDailySeriesSet = new Set(taiwanDailySeriesSymbols);
 
 async function getJson(url) {
   const response = await fetch(url, { cache: "no-store" });
@@ -332,15 +334,51 @@ async function getYahooHistory(symbol, startDate, endDate) {
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+async function getFinMindTaiwanHistory(symbol, startDate, endDate) {
+  const params = new URLSearchParams({
+    dataset: "TaiwanStockPrice",
+    data_id: symbol,
+    start_date: startDate,
+    end_date: endDate,
+  });
+  const result = await getJson(`${endpoints.finmindData}?${params}`);
+  if (result?.status !== 200 || !Array.isArray(result.data)) {
+    throw new Error(result?.msg || `FinMind returned status ${result?.status || "unknown"}`);
+  }
+  return result.data
+    .map((row) => ({
+      date: row.date,
+      value: toNumber(row.close),
+      volume: toNumber(row.Trading_Volume),
+      source: "finmind",
+    }))
+    .filter((point) => point.date >= startDate && point.date <= endDate && point.value > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function getCloseHistory(symbol, startDate, endDate) {
+  if (taiwanDailySeriesSet.has(symbol)) {
+    try {
+      const points = await getFinMindTaiwanHistory(symbol, startDate, endDate);
+      if (points.length) return { points, source: "FinMind TaiwanStockPrice" };
+    } catch (error) {
+      console.warn(`FinMind unavailable for ${symbol}: ${error.message}`);
+    }
+  }
+
+  const points = await getYahooHistory(symbol, startDate, endDate);
+  return { points, source: "Yahoo Finance chart" };
+}
+
 async function getDcaSymbolHistories(latestDate) {
   const startDate = addMonthsIso(latestDate.slice(0, 7) + "-01", -36);
   const histories = {};
   for (const symbol of dcaSeriesSymbols) {
     try {
-      const points = await getYahooHistory(symbol, startDate, latestDate);
-      if (points.length) histories[symbol] = { symbol, startDate, endDate: latestDate, points };
+      const { points, source } = await getCloseHistory(symbol, startDate, latestDate);
+      if (points.length) histories[symbol] = { symbol, startDate, endDate: latestDate, source, points };
     } catch (error) {
-      console.warn(`No DCA series for ${symbol}: ${error.message}`);
+      console.warn(`No close series for ${symbol}: ${error.message}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 160));
   }
