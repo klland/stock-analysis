@@ -688,10 +688,10 @@ async function adjustedHistoryFor(symbol, startDate, endDate) {
   if (!yahooSymbol) return [];
 
   const cache = readAdjustedHistoryCache();
-  const cacheKey = `${symbol}:${startDate}:${endDate}`;
+  const cacheKey = `v3:${symbol}:${startDate}:${endDate}`;
   if (Array.isArray(cache[cacheKey])) return cache[cacheKey];
 
-  const start = Math.floor(new Date(`${addDaysIso(startDate, -10)}T00:00:00Z`).getTime() / 1000);
+  const start = Math.max(0, Math.floor(new Date(`${addDaysIso(startDate, -10)}T00:00:00Z`).getTime() / 1000));
   const end = Math.floor(new Date(`${addDaysIso(endDate, 3)}T00:00:00Z`).getTime() / 1000);
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?period1=${start}&period2=${end}&interval=1d&events=history%7Cdiv%7Csplit`;
   const result = await fetchJson(url);
@@ -1957,7 +1957,7 @@ function stockTrendPeriodLabel(period = state.stockTrendPeriod) {
 
 function stockTrendWindow(period = state.stockTrendPeriod) {
   const endDate = state.marketDataDate || priceDates.at(-1);
-  if (period === "all") return { startDate: "1970-01-01", endDate, label: "全部" };
+  if (period === "all") return { startDate: "2000-01-01", endDate, label: "全部" };
   const lookbackDays = {
     "1d": 1,
     "1w": 7,
