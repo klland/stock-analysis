@@ -159,6 +159,7 @@ let compareRenderToken = 0;
 let dcaRenderToken = 0;
 let scenarioRenderToken = 0;
 let stockTrendRenderToken = 0;
+let stockTrendChartState = { points: [], hoverIndex: null };
 
 const sectorNames = {
   "01": "水泥",
@@ -1956,7 +1957,7 @@ function stockTrendPeriodLabel(period = state.stockTrendPeriod) {
 
 function stockTrendWindow(period = state.stockTrendPeriod) {
   const endDate = state.marketDataDate || priceDates.at(-1);
-  if (period === "all") return { startDate: "2000-01-01", endDate, label: "全部" };
+  if (period === "all") return { startDate: "1970-01-01", endDate, label: "全部" };
   const lookbackDays = {
     "1d": 1,
     "1w": 7,
@@ -1994,7 +1995,11 @@ async function stockTrendPoints(symbol, period = state.stockTrendPeriod) {
   const { startDate, endDate } = stockTrendWindow(period);
   const localPoints = localStockTrendPoints(symbol, startDate, endDate);
   const needsLongHistory = period === "3m" || period === "6m" || period === "1y" || period === "5y" || period === "all";
-  if (localPoints.length >= 6 || (!needsLongHistory && localPoints.length >= 2)) {
+  const localCoverageStart = localPoints[0]?.date || "";
+  const hasEnoughCoverage = localCoverageStart && localCoverageStart <= addDaysIso(startDate, 14);
+  if ((period === "5y" || period === "all") && !hasEnoughCoverage) {
+    // Force a full Yahoo history fetch; the bundled local series only keeps a compact recent window.
+  } else if (localPoints.length >= 6 || (!needsLongHistory && localPoints.length >= 2)) {
     return { points: localPoints, startDate, endDate, source: localPoints.some((point) => point.source === "history") ? "本地日線" : "本地快照" };
   }
 
@@ -2009,7 +2014,11 @@ async function stockTrendPoints(symbol, period = state.stockTrendPeriod) {
   return { points: localPoints, startDate, endDate, source: localPoints.length ? "本地快照" : "無資料" };
 }
 
-function drawPriceChart(canvas, points) {
+function stockTrendTimeLabel(symbol) {
+  return stocks[symbol]?.market === "US" ? "16:00 收盤" : "13:30 收盤";
+}
+
+function drawPriceChart(canvas, points, options = {}) {
   const ctx = canvas.getContext("2d");
   const values = points.map((point) => point.value).filter((value) => value > 0);
   canvas.height = 360;
@@ -2032,6 +2041,7 @@ function drawPriceChart(canvas, points) {
   const height = canvas.height - padding.top - padding.bottom;
   const isPositive = points.at(-1).value >= points[0].value;
   const lineColor = isPositive ? "#0f8f4f" : "#d93025";
+  const hoverIndex = Number.isInteger(options.hoverIndex) ? Math.max(0, Math.min(points.length - 1, options.hoverIndex)) : null;
 
   ctx.strokeStyle = "#eef1ee";
   ctx.lineWidth = 1;
@@ -2079,6 +2089,43 @@ function drawPriceChart(canvas, points) {
   ctx.textAlign = "right";
   ctx.fillText(points.at(-1).date, canvas.width - padding.right, canvas.height - 10);
   ctx.textAlign = "left";
+
+  if (hoverIndex !== null) {
+    const point = points[hoverIndex];
+    const coord = coords[hoverIndex];
+    const baseValue = options.baseValue || points[0].value;
+    const pointReturn = baseValue > 0 ? point.value / baseValue - 1 : NaN;
+    const tooltipLines = [
+      `${point.date} ${stockTrendTimeLabel(options.symbol)}`,
+      `${priceFormat.format(point.value)}  ${Number.isFinite(pointReturn) ? percent.format(pointReturn) : "--"}`,
+    ];
+    const boxWidth = 190;
+    const boxHeight = 58;
+    const boxX = Math.max(12, Math.min(canvas.width - boxWidth - 12, coord.x - boxWidth / 2));
+    const boxY = coord.y > 92 ? coord.y - boxHeight - 18 : coord.y + 18;
+
+    ctx.strokeStyle = "rgba(24, 32, 27, 0.28)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(coord.x, padding.top);
+    ctx.lineTo(coord.x, canvas.height - padding.bottom);
+    ctx.stroke();
+
+    ctx.fillStyle = lineColor;
+    ctx.beginPath();
+    ctx.arc(coord.x, coord.y, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(24, 32, 27, 0.92)";
+    ctx.beginPath();
+    ctx.roundRect(boxX, boxY, boxWidth, boxHeight, 10);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "12px system-ui";
+    ctx.fillText(tooltipLines[0], boxX + 12, boxY + 22);
+    ctx.font = "700 15px system-ui";
+    ctx.fillText(tooltipLines[1], boxX + 12, boxY + 43);
+  }
 }
 
 function drawLineChart(canvas, seriesList, formatter = currency, options = {}) {
@@ -2946,6 +2993,7 @@ async function renderStockTrend() {
   $("#stockTrendVolume").textContent = "--";
   $("#stockTrendTradeValue").textContent = "--";
   drawPriceChart($("#stockTrendChart"), []);
+  stockTrendChartState = { points: [], hoverIndex: null, symbol, baseValue: 0 };
 
   const result = await stockTrendPoints(symbol);
   if (token !== stockTrendRenderToken) return;
@@ -2969,9 +3017,10 @@ async function renderStockTrend() {
   $("#stockTrendTradeValue").textContent = formatMarketCap(stock.tradeValue || 0);
   $("#stockTrendNote").textContent =
     points.length >= 2
-      ? `${symbol} ${stock.name}，${result.source}，區間 ${first.date} 到 ${last.date}，共 ${points.length} 個交易日。`
+      ? `${symbol} ${stock.name}，${result.source}，區間 ${first.date} 到 ${last.date}，共 ${points.length} 個交易日；滑鼠移到線上可看單日收盤時間與價格。`
       : `${symbol} ${stock.name} 在 ${stockTrendPeriodLabel()} 區間沒有足夠日線；請改選較短期間或稍後重試。`;
-  drawPriceChart($("#stockTrendChart"), points);
+  stockTrendChartState = { points, hoverIndex: null, symbol, baseValue: first?.value || 0 };
+  drawPriceChart($("#stockTrendChart"), points, stockTrendChartState);
 }
 
 function renderRiskPosition() {
@@ -3305,6 +3354,23 @@ function bindEvents() {
     state.stockTrendPeriod = button.dataset.stockPeriod;
     saveUserState();
     renderStockTrend();
+  });
+  $("#stockTrendChart").addEventListener("mousemove", (event) => {
+    const canvas = event.currentTarget;
+    const points = stockTrendChartState.points || [];
+    if (points.length < 2) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (event.clientX - rect.left) * (canvas.width / rect.width);
+    const padding = { left: 18, right: 18 };
+    const ratio = clamp((x - padding.left) / Math.max(1, canvas.width - padding.left - padding.right));
+    const hoverIndex = Math.round(ratio * (points.length - 1));
+    stockTrendChartState = { ...stockTrendChartState, hoverIndex };
+    drawPriceChart(canvas, points, stockTrendChartState);
+  });
+  $("#stockTrendChart").addEventListener("mouseleave", (event) => {
+    const points = stockTrendChartState.points || [];
+    stockTrendChartState = { ...stockTrendChartState, hoverIndex: null };
+    drawPriceChart(event.currentTarget, points, stockTrendChartState);
   });
   document.addEventListener("click", (event) => {
     const button = event.target.closest("[data-select-stock]");
