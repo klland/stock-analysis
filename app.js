@@ -139,7 +139,7 @@ const state = {
   marketDataDate: "",
 };
 
-const TWSE_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL";
+const TWSE_DAILY_URL = "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data";
 const TWSE_COMPANY_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L";
 const TPEX_DAILY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=EW&o=data";
 const TWSE_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX";
@@ -543,6 +543,24 @@ function parseCsv(text) {
   return rows.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] || ""])));
 }
 
+function normalizeTwseDailyRows(rows) {
+  return rows
+    .map((row) => ({
+      Date: row.Date || row["日期"] || "",
+      Code: row.Code || row["證券代號"] || "",
+      Name: row.Name || row["證券名稱"] || "",
+      TradeVolume: row.TradeVolume || row["成交股數"] || "",
+      TradeValue: row.TradeValue || row["成交金額"] || "",
+      OpeningPrice: row.OpeningPrice || row["開盤價"] || "",
+      HighestPrice: row.HighestPrice || row["最高價"] || "",
+      LowestPrice: row.LowestPrice || row["最低價"] || "",
+      ClosingPrice: row.ClosingPrice || row["收盤價"] || "",
+      Change: row.Change || row["漲跌價差"] || "",
+      Transaction: row.Transaction || row["成交筆數"] || "",
+    }))
+    .filter((row) => row.Date && row.Code && row.ClosingPrice);
+}
+
 function parseTwseHistory(json) {
   const table = json?.tables?.find((item) => item.fields?.includes("證券代號") && item.fields?.includes("收盤價"));
   if (!table?.data?.length) return {};
@@ -776,7 +794,7 @@ async function fetchMarketData() {
   if (!dailyResponse.ok || !companyResponse.ok || !tpexResponse.ok) {
     throw new Error("TWSE API request failed");
   }
-  const daily = await dailyResponse.json();
+  const daily = normalizeTwseDailyRows(parseCsv(await dailyResponse.text()));
   const companies = await companyResponse.json();
   const tpexDaily = parseCsv(await tpexResponse.text());
   return { daily, companies, tpexDaily, fetchedAt: new Date().toISOString(), date: rocDateToIso(daily[0]?.Date) };

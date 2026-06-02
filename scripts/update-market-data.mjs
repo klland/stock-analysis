@@ -6,7 +6,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outFile = resolve(root, "data", "market-data.js");
 
 const endpoints = {
-  daily: "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
+  daily: "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data",
+  dailyOpenApi: "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
   companies: "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
   tpexDaily: "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=EW&o=data",
   twseHistory: "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
@@ -153,6 +154,34 @@ function parseCsv(text) {
   }
   const headers = rows.shift() || [];
   return rows.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] || ""])));
+}
+
+function normalizeTwseDailyRows(rows) {
+  return rows
+    .map((row) => ({
+      Date: row.Date || row["日期"] || "",
+      Code: row.Code || row["證券代號"] || "",
+      Name: row.Name || row["證券名稱"] || "",
+      TradeVolume: row.TradeVolume || row["成交股數"] || "",
+      TradeValue: row.TradeValue || row["成交金額"] || "",
+      OpeningPrice: row.OpeningPrice || row["開盤價"] || "",
+      HighestPrice: row.HighestPrice || row["最高價"] || "",
+      LowestPrice: row.LowestPrice || row["最低價"] || "",
+      ClosingPrice: row.ClosingPrice || row["收盤價"] || "",
+      Change: row.Change || row["漲跌價差"] || "",
+      Transaction: row.Transaction || row["成交筆數"] || "",
+    }))
+    .filter((row) => row.Date && row.Code && row.ClosingPrice);
+}
+
+async function getTwseDailyRows() {
+  try {
+    const rows = normalizeTwseDailyRows(parseCsv(await getText(endpoints.daily)));
+    if (rows.length > 100) return rows;
+  } catch (error) {
+    console.warn(`TWSE CSV daily unavailable: ${error.message}`);
+  }
+  return normalizeTwseDailyRows(await getJson(endpoints.dailyOpenApi));
 }
 
 function toNumber(value) {
@@ -408,7 +437,7 @@ async function getUsQuote(symbol) {
 }
 
 const [daily, companies, tpexCsv, usDaily] = await Promise.all([
-  getJson(endpoints.daily),
+  getTwseDailyRows(),
   getJson(endpoints.companies),
   getText(endpoints.tpexDaily),
   (async () => {
