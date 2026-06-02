@@ -109,6 +109,18 @@ const state = {
   compareEndDate: "2026-05-08",
   rankingPeriod: "today",
   sector: "全部",
+  hotMarket: "all",
+  hotSector: "全部",
+  hotMinTradeValue: 1,
+  hotMinReturn: 0,
+  hotLimit: 15,
+  hotWeights: {
+    value: 35,
+    momentum: 25,
+    high: 20,
+    trades: 10,
+    relative: 10,
+  },
   dcaSymbols: ["0050", "006208"],
   dcaFrequency: "monthly",
   dcaAmount: 10000,
@@ -316,9 +328,15 @@ function loadUserState() {
     ["watchlist", "portfolioSymbols", "compareSymbols", "dcaSymbols", "conditionalSymbols"].forEach((key) => {
       if (Array.isArray(saved[key])) state[key] = uniqueSymbols(saved[key]);
     });
-    ["benchmark", "riskSymbol", "comparePeriod", "compareStartDate", "compareEndDate", "rankingPeriod", "sector", "dcaFrequency", "dcaStartDate", "dcaEndDate", "conditionalMode", "conditionalStartDate", "conditionalEndDate"].forEach((key) => {
+    ["benchmark", "riskSymbol", "comparePeriod", "compareStartDate", "compareEndDate", "rankingPeriod", "sector", "hotMarket", "hotSector", "dcaFrequency", "dcaStartDate", "dcaEndDate", "conditionalMode", "conditionalStartDate", "conditionalEndDate"].forEach((key) => {
       if (saved[key]) state[key] = saved[key];
     });
+    ["hotMinTradeValue", "hotMinReturn", "hotLimit"].forEach((key) => {
+      if (Number.isFinite(Number(saved[key]))) state[key] = Number(saved[key]);
+    });
+    if (saved.hotWeights && typeof saved.hotWeights === "object") {
+      state.hotWeights = { ...state.hotWeights, ...saved.hotWeights };
+    }
     if (Number.isFinite(Number(saved.dcaAmount))) state.dcaAmount = Number(saved.dcaAmount);
     if (Number.isFinite(Number(saved.conditionalAmount))) state.conditionalAmount = Number(saved.conditionalAmount);
     if (Number.isFinite(Number(saved.conditionalThreshold))) state.conditionalThreshold = Number(saved.conditionalThreshold);
@@ -354,6 +372,12 @@ function saveUserState() {
         compareEndDate: state.compareEndDate,
         rankingPeriod: state.rankingPeriod,
         sector: state.sector,
+        hotMarket: state.hotMarket,
+        hotSector: state.hotSector,
+        hotMinTradeValue: state.hotMinTradeValue,
+        hotMinReturn: state.hotMinReturn,
+        hotLimit: state.hotLimit,
+        hotWeights: state.hotWeights,
         dcaFrequency: state.dcaFrequency,
         dcaAmount: state.dcaAmount,
         dcaStartDate: state.dcaStartDate,
@@ -794,6 +818,7 @@ function applyTwseMarketData(payload) {
       dailyReturn: previous > 0 ? close / previous - 1 : 0,
       periodReturns: historicalReturnsFor(symbol, close),
       tradeValue: toNumber(row.TradeValue),
+      transactions: toNumber(row.Transaction),
       prices: generatedPrices,
     };
     added += 1;
@@ -832,6 +857,7 @@ function applyTpexMarketData(payload) {
       dailyReturn: previous > 0 ? close / previous - 1 : 0,
       periodReturns: historicalReturnsFor(symbol, close),
       tradeValue: toNumber(row["成交金額"]),
+      transactions: toNumber(row["成交筆數"] || row["筆數"]),
       prices: anchoredPriceSeries(symbol, close, [
         previous * 0.78,
         previous * 0.83,
@@ -1782,6 +1808,112 @@ function continuityScore(symbol) {
   return Math.round(returns.reduce((sum, value) => sum + Math.max(0, Math.min(1, value + 0.15)), 0) * (100 / returns.length));
 }
 
+function clamp(value, min = 0, max = 1) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function hotStockUniverse() {
+  return Object.keys(stocks)
+    .filter(isTaiwanRankingSymbol)
+    .filter((symbol) => state.hotMarket === "all" || stocks[symbol].market === state.hotMarket)
+    .filter((symbol) => state.hotSector === "全部" || stocks[symbol].sector === state.hotSector);
+}
+
+function hotStockSectors() {
+  const sourceSymbols = Object.keys(stocks)
+    .filter(isTaiwanRankingSymbol)
+    .filter((symbol) => state.hotMarket === "all" || stocks[symbol].market === state.hotMarket);
+  return ["全部", ...new Set(sourceSymbols.map((symbol) => stocks[symbol].sector).filter(Boolean))];
+}
+
+function hotShortReturn(symbol) {
+  const points = marketPriceSeries(symbol);
+  if (points.length >= 6) {
+    const start = points.at(-6);
+    const end = points.at(-1);
+    return start?.value > 0 ? end.value / start.value - 1 : 0;
+  }
+  const weekly = rankingReturn(symbol, "1w");
+  return Number.isFinite(weekly) ? weekly : stocks[symbol]?.dailyReturn || 0;
+}
+
+function hotHighPosition(symbol) {
+  const points = marketPriceSeries(symbol).slice(-20);
+  const latest = latestPrice(symbol);
+  const high = Math.max(...points.map((point) => point.value), latest);
+  if (!(high > 0) || !(latest > 0)) return 0;
+  return clamp(latest / high);
+}
+
+function hotRelativeStrength(symbol) {
+  const base = hotShortReturn(state.benchmark) || 0;
+  return hotShortReturn(symbol) - base;
+}
+
+function hotWeightTotal() {
+  return Object.values(state.hotWeights).reduce((sum, value) => sum + Math.max(0, Number(value) || 0), 0) || 1;
+}
+
+function scoreFromTradeValue(value, maxValue) {
+  if (!(value > 0) || !(maxValue > 0)) return 0;
+  return clamp(Math.log10(value + 1) / Math.log10(maxValue + 1));
+}
+
+function scoreFromTransactionCount(value, maxValue) {
+  if (!(value > 0) || !(maxValue > 0)) return 0;
+  return clamp(Math.log10(value + 1) / Math.log10(maxValue + 1));
+}
+
+function scoreFromReturn(value) {
+  return clamp((value + 0.02) / 0.14);
+}
+
+function scoreFromRelative(value) {
+  return clamp((value + 0.03) / 0.12);
+}
+
+function hotStockRows() {
+  const symbols = hotStockUniverse();
+  const maxTradeValue = Math.max(...symbols.map((symbol) => stocks[symbol]?.tradeValue || 0), 1);
+  const maxTransactions = Math.max(...symbols.map((symbol) => stocks[symbol]?.transactions || 0), 1);
+  const weightTotal = hotWeightTotal();
+  const minTradeValue = Math.max(0, Number(state.hotMinTradeValue) || 0) * 100_000_000;
+  const minReturn = (Number(state.hotMinReturn) || 0) / 100;
+
+  return symbols
+    .map((symbol) => {
+      const stock = stocks[symbol];
+      const shortReturn = hotShortReturn(symbol);
+      const relativeStrength = hotRelativeStrength(symbol);
+      const highPosition = hotHighPosition(symbol);
+      const valueScore = scoreFromTradeValue(stock.tradeValue || 0, maxTradeValue);
+      const momentumScore = scoreFromReturn(shortReturn);
+      const highScore = highPosition;
+      const tradesScore = scoreFromTransactionCount(stock.transactions || 0, maxTransactions);
+      const relativeScore = scoreFromRelative(relativeStrength);
+      const weighted =
+        valueScore * state.hotWeights.value +
+        momentumScore * state.hotWeights.momentum +
+        highScore * state.hotWeights.high +
+        tradesScore * state.hotWeights.trades +
+        relativeScore * state.hotWeights.relative;
+      return {
+        symbol,
+        shortReturn,
+        relativeStrength,
+        highPosition,
+        tradeValue: stock.tradeValue || 0,
+        valueScore,
+        transactions: stock.transactions || 0,
+        score: Math.round((weighted / weightTotal) * 100),
+        hasDailySeries: (marketDcaSeries[symbol]?.points || []).length >= 6,
+      };
+    })
+    .filter((row) => row.tradeValue >= minTradeValue && row.shortReturn >= minReturn)
+    .sort((a, b) => b.score - a.score || b.tradeValue - a.tradeValue)
+    .slice(0, Math.max(5, Math.min(50, Number(state.hotLimit) || 15)));
+}
+
 function drawLineChart(canvas, seriesList, formatter = currency, options = {}) {
   const ctx = canvas.getContext("2d");
   const values = seriesList.flatMap((item) => item.series.map((point) => point.value));
@@ -2576,6 +2708,54 @@ function renderMarketRanking() {
     .join("");
 }
 
+function renderHotStocks() {
+  $("#hotMarket").value = state.hotMarket;
+  const sectors = hotStockSectors();
+  $("#hotSector").innerHTML = sectors.map((sector) => `<option value="${sector}">${sector}</option>`).join("");
+  if (!sectors.includes(state.hotSector)) state.hotSector = "全部";
+  $("#hotSector").value = state.hotSector;
+  $("#hotMinTradeValue").value = state.hotMinTradeValue;
+  $("#hotMinReturn").value = state.hotMinReturn;
+  $("#hotLimit").value = state.hotLimit;
+
+  Object.entries(state.hotWeights).forEach(([key, value]) => {
+    const input = $(`#hotWeight${key[0].toUpperCase()}${key.slice(1)}`);
+    const label = $(`#hotWeight${key[0].toUpperCase()}${key.slice(1)}Label`);
+    if (input) input.value = value;
+    if (label) label.textContent = `${value}%`;
+  });
+
+  const rows = hotStockRows();
+  const universeCount = hotStockUniverse().length;
+  const dailySeriesCount = rows.filter((row) => row.hasDailySeries).length;
+  $("#hotStockNote").textContent =
+    `資料日 ${state.marketDataDate || priceDates.at(-1)}，從 ${universeCount} 檔上市櫃標的中篩選。` +
+    `成交值與成交筆數使用當日官方行情；短線漲幅與 20 日位置在 ${dailySeriesCount} 檔上榜標的使用日線，其餘使用可用歷史快照降級估算。`;
+
+  if (!rows.length) {
+    $("#hotStockRows").innerHTML = `<tr><td colspan="8">目前條件沒有符合的股票，請降低成交值或漲幅門檻。</td></tr>`;
+    return;
+  }
+
+  $("#hotStockRows").innerHTML = rows
+    .map((row, index) => {
+      const stock = stocks[row.symbol];
+      return `
+        <tr>
+          <td>${index + 1}</td>
+          <td>${row.symbol} ${stock.name}<br><small>${stock.market} · ${stock.sector}</small></td>
+          <td><span class="score-pill hot-score">${row.score}</span></td>
+          <td>${formatMarketCap(row.tradeValue)}</td>
+          <td>${Math.round(row.valueScore * 100)}%</td>
+          <td class="${classForReturn(row.shortReturn)}">${percent.format(row.shortReturn)}</td>
+          <td>${Math.round(row.highPosition * 100)}%</td>
+          <td class="${classForReturn(row.relativeStrength)}">${percent.format(row.relativeStrength)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
 function renderRiskPosition() {
   const symbol = state.riskSymbol;
   const stock = stocks[symbol];
@@ -2658,6 +2838,7 @@ function render() {
   renderDcaEngine();
   renderConditionalEngine();
   renderMarketRanking();
+  renderHotStocks();
   renderRiskPosition();
   renderAdvancedMetrics();
   renderCharts();
@@ -2858,6 +3039,41 @@ function bindEvents() {
     state.sector = event.target.value;
     saveUserState();
     renderMarketRanking();
+  });
+  $("#hotMarket").addEventListener("change", (event) => {
+    state.hotMarket = event.target.value;
+    state.hotSector = "全部";
+    saveUserState();
+    renderHotStocks();
+  });
+  $("#hotSector").addEventListener("change", (event) => {
+    state.hotSector = event.target.value;
+    saveUserState();
+    renderHotStocks();
+  });
+  [
+    ["hotMinTradeValue", "hotMinTradeValue"],
+    ["hotMinReturn", "hotMinReturn"],
+    ["hotLimit", "hotLimit"],
+  ].forEach(([selector, key]) => {
+    $(`#${selector}`).addEventListener("input", (event) => {
+      state[key] = Number(event.target.value) || 0;
+      saveUserState();
+      renderHotStocks();
+    });
+  });
+  [
+    ["hotWeightValue", "value"],
+    ["hotWeightMomentum", "momentum"],
+    ["hotWeightHigh", "high"],
+    ["hotWeightTrades", "trades"],
+    ["hotWeightRelative", "relative"],
+  ].forEach(([selector, key]) => {
+    $(`#${selector}`).addEventListener("input", (event) => {
+      state.hotWeights[key] = Number(event.target.value) || 0;
+      saveUserState();
+      renderHotStocks();
+    });
   });
   $("#riskSymbol").addEventListener("change", (event) => {
     state.riskSymbol = event.target.value;
