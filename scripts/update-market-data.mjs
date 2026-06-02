@@ -345,7 +345,7 @@ function yahooSymbolFor(symbol) {
 }
 
 async function getYahooHistory(symbol, startDate, endDate) {
-  const start = Math.floor(new Date(`${addDaysIso(startDate, -14)}T00:00:00Z`).getTime() / 1000);
+  const start = Math.max(0, Math.floor(new Date(`${addDaysIso(startDate, -14)}T00:00:00Z`).getTime() / 1000));
   const end = Math.floor(new Date(`${addDaysIso(endDate, 3)}T00:00:00Z`).getTime() / 1000);
   const yahooSymbol = yahooSymbolFor(symbol);
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?period1=${start}&period2=${end}&interval=1d&events=history%7Cdiv%7Csplit`;
@@ -389,7 +389,12 @@ async function getCloseHistory(symbol, startDate, endDate) {
   if (taiwanDailySeriesSet.has(symbol)) {
     try {
       const points = await getFinMindTaiwanHistory(symbol, startDate, endDate);
-      if (points.length) return { points, source: "FinMind TaiwanStockPrice" };
+      if (points.length && points[0].date <= addDaysIso(startDate, 31)) {
+        return { points, source: "FinMind TaiwanStockPrice" };
+      }
+      console.warn(
+        `FinMind history for ${symbol} starts at ${points[0]?.date || "none"}, expected near ${startDate}; falling back to Yahoo.`,
+      );
     } catch (error) {
       console.warn(`FinMind unavailable for ${symbol}: ${error.message}`);
     }
@@ -399,10 +404,15 @@ async function getCloseHistory(symbol, startDate, endDate) {
   return { points, source: "Yahoo Finance chart" };
 }
 
+function historyStartDateFor(symbol, latestDate) {
+  if (taiwanDailySeriesSet.has(symbol)) return "2000-01-01";
+  return addMonthsIso(latestDate.slice(0, 7) + "-01", -36);
+}
+
 async function getDcaSymbolHistories(latestDate) {
-  const startDate = addMonthsIso(latestDate.slice(0, 7) + "-01", -36);
   const histories = {};
   for (const symbol of dcaSeriesSymbols) {
+    const startDate = historyStartDateFor(symbol, latestDate);
     try {
       const { points, source } = await getCloseHistory(symbol, startDate, latestDate);
       if (points.length) histories[symbol] = { symbol, startDate, endDate: latestDate, source, points };
