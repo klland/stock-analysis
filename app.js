@@ -121,6 +121,8 @@ const state = {
     trades: 10,
     relative: 10,
   },
+  stockTrendSymbol: "2330",
+  stockTrendPeriod: "1m",
   dcaSymbols: ["0050", "006208"],
   dcaFrequency: "monthly",
   dcaAmount: 10000,
@@ -156,6 +158,7 @@ let singleTradeRenderToken = 0;
 let compareRenderToken = 0;
 let dcaRenderToken = 0;
 let scenarioRenderToken = 0;
+let stockTrendRenderToken = 0;
 
 const sectorNames = {
   "01": "水泥",
@@ -209,6 +212,10 @@ const percent = new Intl.NumberFormat("zh-TW", {
   style: "percent",
   minimumFractionDigits: 1,
   maximumFractionDigits: 1,
+});
+
+const priceFormat = new Intl.NumberFormat("zh-TW", {
+  maximumFractionDigits: 2,
 });
 
 const $ = (selector) => document.querySelector(selector);
@@ -328,7 +335,7 @@ function loadUserState() {
     ["watchlist", "portfolioSymbols", "compareSymbols", "dcaSymbols", "conditionalSymbols"].forEach((key) => {
       if (Array.isArray(saved[key])) state[key] = uniqueSymbols(saved[key]);
     });
-    ["benchmark", "riskSymbol", "comparePeriod", "compareStartDate", "compareEndDate", "rankingPeriod", "sector", "hotMarket", "hotSector", "dcaFrequency", "dcaStartDate", "dcaEndDate", "conditionalMode", "conditionalStartDate", "conditionalEndDate"].forEach((key) => {
+    ["benchmark", "riskSymbol", "comparePeriod", "compareStartDate", "compareEndDate", "rankingPeriod", "sector", "hotMarket", "hotSector", "stockTrendSymbol", "stockTrendPeriod", "dcaFrequency", "dcaStartDate", "dcaEndDate", "conditionalMode", "conditionalStartDate", "conditionalEndDate"].forEach((key) => {
       if (saved[key]) state[key] = saved[key];
     });
     ["hotMinTradeValue", "hotMinReturn", "hotLimit"].forEach((key) => {
@@ -378,6 +385,8 @@ function saveUserState() {
         hotMinReturn: state.hotMinReturn,
         hotLimit: state.hotLimit,
         hotWeights: state.hotWeights,
+        stockTrendSymbol: state.stockTrendSymbol,
+        stockTrendPeriod: state.stockTrendPeriod,
         dcaFrequency: state.dcaFrequency,
         dcaAmount: state.dcaAmount,
         dcaStartDate: state.dcaStartDate,
@@ -1914,6 +1923,125 @@ function hotStockRows() {
     .slice(0, Math.max(5, Math.min(50, Number(state.hotLimit) || 15)));
 }
 
+function stockTrendPeriodLabel(period = state.stockTrendPeriod) {
+  return {
+    "1d": "1日",
+    "1w": "1週",
+    "1m": "1月",
+    "3m": "3月",
+    "6m": "半年",
+    "1y": "1年",
+    "5y": "5年",
+    all: "全部",
+  }[period] || period;
+}
+
+function stockTrendWindow(period = state.stockTrendPeriod) {
+  const endDate = state.marketDataDate || priceDates.at(-1);
+  if (period === "all") return { startDate: "2000-01-01", endDate, label: "全部" };
+  const lookbackDays = {
+    "1d": 1,
+    "1w": 7,
+    "1m": 30,
+    "3m": 90,
+    "6m": 183,
+    "1y": 365,
+    "5y": 365 * 5,
+  }[period] || 30;
+  return { startDate: addDaysIso(endDate, -lookbackDays), endDate, label: stockTrendPeriodLabel(period) };
+}
+
+function localStockTrendPoints(symbol, startDate, endDate) {
+  const points = marketPriceSeries(symbol)
+    .filter((point) => point.date >= addDaysIso(startDate, -14) && point.date <= endDate && point.value > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (points.length >= 2) return points.filter((point) => point.date >= startDate);
+
+  if (state.marketDataDate && stocks[symbol]?.live && (state.stockTrendPeriod === "1d" || state.stockTrendPeriod === "1w")) {
+    const previous = previousClose(symbol);
+    const latest = latestPrice(symbol);
+    if (previous > 0 && latest > 0) {
+      return [
+        { date: "前一交易日", value: previous, source: "daily" },
+        { date: state.marketDataDate, value: latest, source: "daily" },
+      ];
+    }
+  }
+
+  return points;
+}
+
+async function stockTrendPoints(symbol, period = state.stockTrendPeriod) {
+  const { startDate, endDate } = stockTrendWindow(period);
+  const localPoints = localStockTrendPoints(symbol, startDate, endDate);
+  const needsLongHistory = period === "3m" || period === "6m" || period === "1y" || period === "5y" || period === "all";
+  if (localPoints.length >= 6 || (!needsLongHistory && localPoints.length >= 2)) {
+    return { points: localPoints, startDate, endDate, source: localPoints.some((point) => point.source === "history") ? "本地日線" : "本地快照" };
+  }
+
+  try {
+    const fetched = await adjustedHistoryFor(symbol, startDate, endDate);
+    const points = fetched.filter((point) => point.date >= startDate && point.date <= endDate && point.value > 0);
+    if (points.length >= 2) return { points, startDate, endDate, source: "Yahoo 日線" };
+  } catch (error) {
+    console.warn(`Trend history unavailable for ${symbol}: ${error.message}`);
+  }
+
+  return { points: localPoints, startDate, endDate, source: localPoints.length ? "本地快照" : "無資料" };
+}
+
+function drawPriceChart(canvas, points) {
+  const ctx = canvas.getContext("2d");
+  const values = points.map((point) => point.value).filter((value) => value > 0);
+  canvas.height = 340;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#fbfcfb";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.font = "13px system-ui";
+
+  if (values.length < 2) {
+    ctx.fillStyle = "#667068";
+    ctx.fillText("這個區間沒有足夠價格資料。", 24, 44);
+    return;
+  }
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = Math.max(0.01, max - min);
+  const padding = { top: 24, right: 28, bottom: 42, left: 72 };
+  const width = canvas.width - padding.left - padding.right;
+  const height = canvas.height - padding.top - padding.bottom;
+
+  ctx.strokeStyle = "#dce2dc";
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#667068";
+  for (let index = 0; index <= 4; index += 1) {
+    const y = padding.top + height * (index / 4);
+    const value = max - range * (index / 4);
+    ctx.beginPath();
+    ctx.moveTo(padding.left, y);
+    ctx.lineTo(canvas.width - padding.right, y);
+    ctx.stroke();
+    ctx.fillText(priceFormat.format(value), 12, y + 4);
+  }
+
+  ctx.strokeStyle = points.at(-1).value >= points[0].value ? "#0f766e" : "#b42318";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  points.forEach((point, index) => {
+    const x = padding.left + width * (index / Math.max(1, points.length - 1));
+    const y = padding.top + height * (1 - (point.value - min) / range);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  ctx.fillStyle = "#667068";
+  ctx.fillText(points[0].date, padding.left, canvas.height - 16);
+  ctx.fillText(points.at(-1).date, canvas.width - padding.right - 92, canvas.height - 16);
+}
+
 function drawLineChart(canvas, seriesList, formatter = currency, options = {}) {
   const ctx = canvas.getContext("2d");
   const values = seriesList.flatMap((item) => item.series.map((point) => point.value));
@@ -2095,6 +2223,7 @@ function renderControls() {
   $("#benchmarkSelect").innerHTML = options;
   $("#symbolInput").innerHTML = options;
   $("#riskSymbol").innerHTML = options;
+  $("#stockTrendSymbol").innerHTML = optionHtml(sortedEntries.filter(([symbol]) => isTaiwanRankingSymbol(symbol) || stocks[symbol].market === "US").map(([symbol]) => symbol));
   $("#portfolioAddSelect").innerHTML = optionHtml(list.filter((symbol) => !state.portfolioSymbols.includes(symbol)));
   $("#compareAddSelect").innerHTML = optionHtml(list.filter((symbol) => !state.compareSymbols.includes(symbol)));
   $("#dcaAddSelect").innerHTML = optionHtml(list.filter((symbol) => !state.dcaSymbols.includes(symbol)));
@@ -2105,6 +2234,8 @@ function renderControls() {
   $("#conditionalAddForm button").disabled = !$("#conditionalAddSelect").value;
   $("#benchmarkSelect").value = state.benchmark;
   $("#riskSymbol").value = state.riskSymbol;
+  if (!stocks[state.stockTrendSymbol]) state.stockTrendSymbol = list[0] || "2330";
+  $("#stockTrendSymbol").value = state.stockTrendSymbol;
   $("#symbolInput").value = list[0] || "2330";
   $("#dateInput").value = "2024-01-15";
   $("#amountInput").value = 1000;
@@ -2697,7 +2828,7 @@ function renderMarketRanking() {
       return `
         <tr>
           <td>${index + 1}</td>
-          <td>${row.symbol} ${stock.name}<br><small>${stock.sector}</small></td>
+          <td><button class="stock-link" type="button" data-select-stock="${row.symbol}">${row.symbol} ${stock.name}</button><br><small>${stock.sector}</small></td>
           <td class="${classForReturn(row.returnRate)}">${percent.format(row.returnRate)}</td>
           <td>${formatVolume(stock.volume)}</td>
           <td>${formatMarketCap(row.marketCap)}</td>
@@ -2743,7 +2874,7 @@ function renderHotStocks() {
       return `
         <tr>
           <td>${index + 1}</td>
-          <td>${row.symbol} ${stock.name}<br><small>${stock.market} · ${stock.sector}</small></td>
+          <td><button class="stock-link" type="button" data-select-stock="${row.symbol}">${row.symbol} ${stock.name}</button><br><small>${stock.market} · ${stock.sector}</small></td>
           <td><span class="score-pill hot-score">${row.score}</span></td>
           <td>${formatMarketCap(row.tradeValue)}</td>
           <td>${Math.round(row.valueScore * 100)}%</td>
@@ -2754,6 +2885,46 @@ function renderHotStocks() {
       `;
     })
     .join("");
+}
+
+async function renderStockTrend() {
+  const token = ++stockTrendRenderToken;
+  const symbol = stocks[state.stockTrendSymbol] ? state.stockTrendSymbol : visibleSymbols()[0] || "2330";
+  state.stockTrendSymbol = symbol;
+  const stock = stocks[symbol];
+  $("#stockTrendSymbol").value = symbol;
+  [...document.querySelectorAll("[data-stock-period]")].forEach((button) => {
+    button.classList.toggle("active", button.dataset.stockPeriod === state.stockTrendPeriod);
+  });
+  $("#stockTrendNote").textContent = `正在取得 ${symbol} ${stock.name} ${stockTrendPeriodLabel()} 走勢...`;
+  $("#stockTrendReturn").textContent = "--";
+  $("#stockTrendReturn").className = "";
+  $("#stockTrendLatest").textContent = "--";
+  $("#stockTrendHigh").textContent = "--";
+  $("#stockTrendLow").textContent = "--";
+  drawPriceChart($("#stockTrendChart"), []);
+
+  const result = await stockTrendPoints(symbol);
+  if (token !== stockTrendRenderToken) return;
+
+  const points = result.points;
+  const first = points[0];
+  const last = points.at(-1);
+  const values = points.map((point) => point.value);
+  const returnRate = first?.value > 0 && last?.value > 0 ? last.value / first.value - 1 : NaN;
+  const high = Math.max(...values);
+  const low = Math.min(...values);
+
+  $("#stockTrendReturn").textContent = metricValue(returnRate);
+  $("#stockTrendReturn").className = classForReturn(returnRate);
+  $("#stockTrendLatest").textContent = last?.value > 0 ? priceFormat.format(last.value) : "--";
+  $("#stockTrendHigh").textContent = Number.isFinite(high) ? priceFormat.format(high) : "--";
+  $("#stockTrendLow").textContent = Number.isFinite(low) ? priceFormat.format(low) : "--";
+  $("#stockTrendNote").textContent =
+    points.length >= 2
+      ? `${symbol} ${stock.name}，${result.source}，區間 ${first.date} 到 ${last.date}，共 ${points.length} 個交易日。`
+      : `${symbol} ${stock.name} 在 ${stockTrendPeriodLabel()} 區間沒有足夠日線；請改選較短期間或稍後重試。`;
+  drawPriceChart($("#stockTrendChart"), points);
 }
 
 function renderRiskPosition() {
@@ -2839,6 +3010,7 @@ function render() {
   renderConditionalEngine();
   renderMarketRanking();
   renderHotStocks();
+  renderStockTrend();
   renderRiskPosition();
   renderAdvancedMetrics();
   renderCharts();
@@ -3074,6 +3246,28 @@ function bindEvents() {
       saveUserState();
       renderHotStocks();
     });
+  });
+  $("#stockTrendSymbol").addEventListener("change", (event) => {
+    state.stockTrendSymbol = event.target.value;
+    saveUserState();
+    renderStockTrend();
+  });
+  $("#stockTrendPeriods").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-stock-period]");
+    if (!button) return;
+    state.stockTrendPeriod = button.dataset.stockPeriod;
+    saveUserState();
+    renderStockTrend();
+  });
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-select-stock]");
+    if (!button) return;
+    const symbol = button.dataset.selectStock;
+    if (!stocks[symbol]) return;
+    state.stockTrendSymbol = symbol;
+    saveUserState();
+    renderStockTrend();
+    document.querySelector("#stock-trend")?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
   $("#riskSymbol").addEventListener("change", (event) => {
     state.riskSymbol = event.target.value;

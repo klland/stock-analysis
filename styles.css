@@ -637,6 +637,56 @@ td:last-child {
   min-width: 2.8rem;
 }
 
+.stock-link {
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-weight: 800;
+  text-align: left;
+}
+
+.stock-link:hover {
+  background: transparent;
+  color: var(--accent);
+}
+
+.stock-trend-controls {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.stock-trend-controls label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.segmented-control {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.segmented-control button {
+  min-height: 2.25rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--border);
+  background: #fbfcfb;
+  color: var(--muted);
+}
+
+.segmented-control button:hover,
+.segmented-control button.active {
+  border-color: var(--accent);
+  background: #dff3ed;
+  color: var(--accent-dark);
+}
+
+.stock-trend-metrics {
+  margin-top: 1rem;
+}
+
 .score-pill {
   display: inline-flex;
   align-items: center;
