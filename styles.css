@@ -652,16 +652,6 @@ td:last-child {
   color: var(--accent);
 }
 
-.stock-trend-controls {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.stock-trend-controls label {
-  display: grid;
-  gap: 0.35rem;
-}
-
 .segmented-control {
   display: flex;
   flex-wrap: wrap;
@@ -683,8 +673,112 @@ td:last-child {
   color: var(--accent-dark);
 }
 
-.stock-trend-metrics {
+.apple-stock-panel {
+  overflow: hidden;
+}
+
+.apple-stock-topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.apple-stock-topbar h3 {
+  font-size: 1.9rem;
+  line-height: 1.05;
+}
+
+.apple-stock-topbar span,
+.apple-stock-topbar label {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.apple-stock-topbar label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.apple-quote-row {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
   margin-top: 1rem;
+}
+
+.apple-price {
+  display: block;
+  font-size: clamp(3.2rem, 7vw, 5.8rem);
+  line-height: 0.95;
+  letter-spacing: 0;
+}
+
+.apple-change {
+  margin-top: 0.45rem;
+  font-size: 1.15rem;
+  font-weight: 850;
+}
+
+.apple-periods {
+  justify-content: flex-end;
+}
+
+.apple-periods button {
+  border-radius: 999px;
+  min-width: 3.2rem;
+  border-color: transparent;
+  background: var(--surface-muted);
+}
+
+.apple-periods button.active {
+  background: var(--text);
+  color: #fff;
+  border-color: var(--text);
+}
+
+.apple-stock-panel canvas {
+  display: block;
+  width: 100%;
+  margin-top: 1rem;
+  border-radius: 8px;
+}
+
+.stock-trend-footnote {
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.apple-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  margin-top: 1rem;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.apple-stat-grid article {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.85rem 1rem;
+  border-right: 1px solid var(--border);
+}
+
+.apple-stat-grid article:last-child {
+  border-right: 0;
+}
+
+.apple-stat-grid span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.apple-stat-grid strong {
+  font-size: 1.1rem;
 }
 
 .score-pill {
@@ -798,6 +892,7 @@ code {
   .schema-grid,
   .selected-list,
   .hot-weight-grid,
+  .apple-stat-grid,
   .weight-grid {
     grid-template-columns: 1fr 1fr;
   }
@@ -813,7 +908,9 @@ code {
   }
 
   .toolbar,
-  .panel-heading {
+  .panel-heading,
+  .apple-stock-topbar,
+  .apple-quote-row {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -827,6 +924,7 @@ code {
   .schema-grid,
   .selected-list,
   .hot-weight-grid,
+  .apple-stat-grid,
   .weight-grid,
   .trade-form {
     grid-template-columns: 1fr;
@@ -865,5 +963,18 @@ code {
 
   .compare-custom-fields {
     flex-direction: column;
+  }
+
+  .apple-periods {
+    justify-content: flex-start;
+  }
+
+  .apple-stat-grid article {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .apple-stat-grid article:last-child {
+    border-bottom: 0;
   }
 }

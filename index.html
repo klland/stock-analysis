@@ -440,49 +440,54 @@
           </div>
         </section>
 
-        <section id="stock-trend" class="panel chart-panel">
-          <div class="panel-heading">
+        <section id="stock-trend" class="panel chart-panel apple-stock-panel">
+          <div class="apple-stock-topbar">
             <div>
-              <p class="eyebrow">Single Stock Trend</p>
-              <h3>單股走勢與區間漲幅</h3>
+              <p class="eyebrow">Stocks</p>
+              <h3 id="stockTrendTitle">--</h3>
+              <span id="stockTrendSubtitle">--</span>
             </div>
-            <div class="inline-controls stock-trend-controls">
-              <label>
-                股票
-                <select id="stockTrendSymbol"></select>
-              </label>
-              <div id="stockTrendPeriods" class="segmented-control" aria-label="走勢區間">
-                <button type="button" data-stock-period="1d">1日</button>
-                <button type="button" data-stock-period="1w">1週</button>
-                <button type="button" data-stock-period="1m">1月</button>
-                <button type="button" data-stock-period="3m">3月</button>
-                <button type="button" data-stock-period="6m">半年</button>
-                <button type="button" data-stock-period="1y">1年</button>
-                <button type="button" data-stock-period="5y">5年</button>
-                <button type="button" data-stock-period="all">全部</button>
-              </div>
+            <label>
+              股票
+              <select id="stockTrendSymbol"></select>
+            </label>
+          </div>
+          <div class="apple-quote-row">
+            <div>
+              <strong id="stockTrendLatest" class="apple-price">--</strong>
+              <div id="stockTrendReturn" class="apple-change">--</div>
+            </div>
+            <div id="stockTrendPeriods" class="segmented-control apple-periods" aria-label="走勢區間">
+              <button type="button" data-stock-period="1d">1日</button>
+              <button type="button" data-stock-period="1w">1週</button>
+              <button type="button" data-stock-period="1m">1月</button>
+              <button type="button" data-stock-period="3m">3月</button>
+              <button type="button" data-stock-period="6m">半年</button>
+              <button type="button" data-stock-period="1y">1年</button>
+              <button type="button" data-stock-period="5y">5年</button>
+              <button type="button" data-stock-period="all">全部</button>
             </div>
           </div>
-          <section class="metric-grid compact stock-trend-metrics" aria-label="單股走勢摘要">
-            <article class="metric">
-              <span>區間漲幅</span>
-              <strong id="stockTrendReturn">--</strong>
-            </article>
-            <article class="metric">
-              <span>最新收盤</span>
-              <strong id="stockTrendLatest">--</strong>
-            </article>
-            <article class="metric">
-              <span>區間高點</span>
+          <canvas id="stockTrendChart" width="920" height="360" aria-label="單股價格走勢圖"></canvas>
+          <div id="stockTrendNote" class="stock-trend-footnote"></div>
+          <section class="apple-stat-grid" aria-label="單股走勢摘要">
+            <article>
+              <span>高</span>
               <strong id="stockTrendHigh">--</strong>
             </article>
-            <article class="metric">
-              <span>區間低點</span>
+            <article>
+              <span>低</span>
               <strong id="stockTrendLow">--</strong>
             </article>
+            <article>
+              <span>成交量</span>
+              <strong id="stockTrendVolume">--</strong>
+            </article>
+            <article>
+              <span>成交值</span>
+              <strong id="stockTrendTradeValue">--</strong>
+            </article>
           </section>
-          <div id="stockTrendNote" class="section-note"></div>
-          <canvas id="stockTrendChart" width="920" height="340" aria-label="單股價格走勢圖"></canvas>
         </section>
 
         <section id="risk-position" class="panel">

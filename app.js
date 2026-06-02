@@ -1994,9 +1994,9 @@ async function stockTrendPoints(symbol, period = state.stockTrendPeriod) {
 function drawPriceChart(canvas, points) {
   const ctx = canvas.getContext("2d");
   const values = points.map((point) => point.value).filter((value) => value > 0);
-  canvas.height = 340;
+  canvas.height = 360;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#fbfcfb";
+  ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.font = "13px system-ui";
 
@@ -2009,37 +2009,58 @@ function drawPriceChart(canvas, points) {
   const min = Math.min(...values);
   const max = Math.max(...values);
   const range = Math.max(0.01, max - min);
-  const padding = { top: 24, right: 28, bottom: 42, left: 72 };
+  const padding = { top: 18, right: 18, bottom: 34, left: 18 };
   const width = canvas.width - padding.left - padding.right;
   const height = canvas.height - padding.top - padding.bottom;
+  const isPositive = points.at(-1).value >= points[0].value;
+  const lineColor = isPositive ? "#0f8f4f" : "#d93025";
 
-  ctx.strokeStyle = "#dce2dc";
+  ctx.strokeStyle = "#eef1ee";
   ctx.lineWidth = 1;
-  ctx.fillStyle = "#667068";
-  for (let index = 0; index <= 4; index += 1) {
+  for (let index = 1; index <= 3; index += 1) {
     const y = padding.top + height * (index / 4);
-    const value = max - range * (index / 4);
     ctx.beginPath();
     ctx.moveTo(padding.left, y);
     ctx.lineTo(canvas.width - padding.right, y);
     ctx.stroke();
-    ctx.fillText(priceFormat.format(value), 12, y + 4);
   }
 
-  ctx.strokeStyle = points.at(-1).value >= points[0].value ? "#0f766e" : "#b42318";
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  points.forEach((point, index) => {
+  const coords = points.map((point, index) => {
     const x = padding.left + width * (index / Math.max(1, points.length - 1));
     const y = padding.top + height * (1 - (point.value - min) / range);
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    return { x, y };
+  });
+
+  const gradient = ctx.createLinearGradient(0, padding.top, 0, canvas.height - padding.bottom);
+  gradient.addColorStop(0, isPositive ? "rgba(15, 143, 79, 0.18)" : "rgba(217, 48, 37, 0.18)");
+  gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
+  ctx.beginPath();
+  coords.forEach((point, index) => {
+    if (index === 0) ctx.moveTo(point.x, point.y);
+    else ctx.lineTo(point.x, point.y);
+  });
+  ctx.lineTo(coords.at(-1).x, canvas.height - padding.bottom);
+  ctx.lineTo(coords[0].x, canvas.height - padding.bottom);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 3.5;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  coords.forEach((point, index) => {
+    if (index === 0) ctx.moveTo(point.x, point.y);
+    else ctx.lineTo(point.x, point.y);
   });
   ctx.stroke();
 
   ctx.fillStyle = "#667068";
-  ctx.fillText(points[0].date, padding.left, canvas.height - 16);
-  ctx.fillText(points.at(-1).date, canvas.width - padding.right - 92, canvas.height - 16);
+  ctx.fillText(points[0].date, padding.left, canvas.height - 10);
+  ctx.textAlign = "right";
+  ctx.fillText(points.at(-1).date, canvas.width - padding.right, canvas.height - 10);
+  ctx.textAlign = "left";
 }
 
 function drawLineChart(canvas, seriesList, formatter = currency, options = {}) {
@@ -2893,15 +2914,19 @@ async function renderStockTrend() {
   state.stockTrendSymbol = symbol;
   const stock = stocks[symbol];
   $("#stockTrendSymbol").value = symbol;
+  $("#stockTrendTitle").textContent = stock.name;
+  $("#stockTrendSubtitle").textContent = `${symbol} · ${stock.market} · ${stock.sector}`;
   [...document.querySelectorAll("[data-stock-period]")].forEach((button) => {
     button.classList.toggle("active", button.dataset.stockPeriod === state.stockTrendPeriod);
   });
   $("#stockTrendNote").textContent = `正在取得 ${symbol} ${stock.name} ${stockTrendPeriodLabel()} 走勢...`;
   $("#stockTrendReturn").textContent = "--";
-  $("#stockTrendReturn").className = "";
+  $("#stockTrendReturn").className = "apple-change";
   $("#stockTrendLatest").textContent = "--";
   $("#stockTrendHigh").textContent = "--";
   $("#stockTrendLow").textContent = "--";
+  $("#stockTrendVolume").textContent = "--";
+  $("#stockTrendTradeValue").textContent = "--";
   drawPriceChart($("#stockTrendChart"), []);
 
   const result = await stockTrendPoints(symbol);
@@ -2915,11 +2940,15 @@ async function renderStockTrend() {
   const high = Math.max(...values);
   const low = Math.min(...values);
 
-  $("#stockTrendReturn").textContent = metricValue(returnRate);
-  $("#stockTrendReturn").className = classForReturn(returnRate);
+  $("#stockTrendReturn").textContent = Number.isFinite(returnRate)
+    ? `${returnRate >= 0 ? "+" : ""}${percent.format(returnRate)} ${stockTrendPeriodLabel()}`
+    : "--";
+  $("#stockTrendReturn").className = `apple-change ${classForReturn(returnRate)}`.trim();
   $("#stockTrendLatest").textContent = last?.value > 0 ? priceFormat.format(last.value) : "--";
   $("#stockTrendHigh").textContent = Number.isFinite(high) ? priceFormat.format(high) : "--";
   $("#stockTrendLow").textContent = Number.isFinite(low) ? priceFormat.format(low) : "--";
+  $("#stockTrendVolume").textContent = formatVolume(stock.volume);
+  $("#stockTrendTradeValue").textContent = formatMarketCap(stock.tradeValue || 0);
   $("#stockTrendNote").textContent =
     points.length >= 2
       ? `${symbol} ${stock.name}，${result.source}，區間 ${first.date} 到 ${last.date}，共 ${points.length} 個交易日。`
