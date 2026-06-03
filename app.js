@@ -144,6 +144,7 @@ const TWSE_COMPANY_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L";
 const TPEX_DAILY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=EW&o=data";
 const TWSE_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX";
 const TPEX_HISTORY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php";
+const FINMIND_DATA_URL = "https://api.finmindtrade.com/api/v4/data";
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
 const HISTORY_CLOSE_CACHE_KEY = "decision-ledger-history-close-cache-v1";
 const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-close-cache-v2";
@@ -651,6 +652,12 @@ function yahooSymbolFor(symbol) {
   return `${symbol}.${stocks[symbol]?.market === "TPEX" ? "TWO" : "TW"}`;
 }
 
+function addYearsIso(isoDate, years) {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  const date = new Date(Date.UTC(year + years, month - 1, day));
+  return date.toISOString().slice(0, 10);
+}
+
 async function adjustedCloseOnOrBefore(symbol, targetDate) {
   const yahooSymbol = yahooSymbolFor(symbol);
   if (!yahooSymbol) return null;
@@ -684,12 +691,50 @@ async function adjustedCloseOnOrBefore(symbol, targetDate) {
 }
 
 async function adjustedHistoryFor(symbol, startDate, endDate) {
+  const cache = readAdjustedHistoryCache();
+  const cacheKey = `v4:${symbol}:${startDate}:${endDate}`;
+  if (Array.isArray(cache[cacheKey])) return cache[cacheKey];
+
+  if (isTaiwanSymbol(symbol)) {
+    try {
+      const points = [];
+      let cursor = startDate;
+      while (cursor <= endDate) {
+        const chunkEnd = [addDaysIso(addYearsIso(cursor, 5), -1), endDate].sort()[0];
+        const params = new URLSearchParams({
+          dataset: "TaiwanStockPrice",
+          data_id: symbol,
+          start_date: cursor,
+          end_date: chunkEnd,
+        });
+        const result = await fetchJson(`${FINMIND_DATA_URL}?${params}`);
+        points.push(
+          ...(Array.isArray(result?.data) ? result.data : []).map((row) => ({
+            date: row.date,
+            value: toNumber(row.close),
+            volume: toNumber(row.Trading_Volume),
+            source: "finmind",
+          })),
+        );
+        cursor = addDaysIso(chunkEnd, 1);
+      }
+      const uniquePoints = Object.values(Object.fromEntries(
+        points
+          .filter((point) => point.date >= startDate && point.date <= endDate && point.value > 0)
+          .map((point) => [point.date, point]),
+      )).sort((a, b) => a.date.localeCompare(b.date));
+      if (uniquePoints.length >= 2) {
+        cache[cacheKey] = uniquePoints;
+        writeAdjustedHistoryCache(cache);
+        return uniquePoints;
+      }
+    } catch (error) {
+      console.warn(`FinMind trend history unavailable for ${symbol}: ${error.message}`);
+    }
+  }
+
   const yahooSymbol = yahooSymbolFor(symbol);
   if (!yahooSymbol) return [];
-
-  const cache = readAdjustedHistoryCache();
-  const cacheKey = `v3:${symbol}:${startDate}:${endDate}`;
-  if (Array.isArray(cache[cacheKey])) return cache[cacheKey];
 
   const start = Math.max(0, Math.floor(new Date(`${addDaysIso(startDate, -10)}T00:00:00Z`).getTime() / 1000));
   const end = Math.floor(new Date(`${addDaysIso(endDate, 3)}T00:00:00Z`).getTime() / 1000);
@@ -710,6 +755,27 @@ async function adjustedHistoryFor(symbol, startDate, endDate) {
   cache[cacheKey] = points;
   writeAdjustedHistoryCache(cache);
   return points;
+}
+
+async function ensureFullHistoryFor(symbol) {
+  if (!stocks[symbol] || !isTaiwanSymbol(symbol)) return false;
+  const endDate = state.marketDataDate || priceDates.at(-1);
+  const localPoints = localStockTrendPoints(symbol, "2000-01-01", endDate);
+  if (localPoints[0]?.date && localPoints[0].date <= "2001-01-31") return true;
+  try {
+    const points = await adjustedHistoryFor(symbol, "2000-01-01", endDate);
+    return points[0]?.date && points[0].date <= "2001-01-31";
+  } catch (error) {
+    console.warn(`Full history prefetch unavailable for ${symbol}: ${error.message}`);
+    return false;
+  }
+}
+
+async function ensureWatchlistFullHistories(symbols = state.watchlist) {
+  const targets = uniqueSymbols(symbols).filter((symbol) => stocks[symbol] && isTaiwanSymbol(symbol));
+  for (const symbol of targets) {
+    await ensureFullHistoryFor(symbol);
+  }
 }
 
 function pricePointOnOrAfter(points, date) {
@@ -952,6 +1018,7 @@ async function loadDailyMarketData() {
     hydrateUserStateOnce();
     renderControls();
     render();
+    void ensureWatchlistFullHistories();
     setMarketStatus(`已載入本地每日資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔；排程會每天收盤後更新。`, "ok");
     return;
   }
@@ -964,6 +1031,7 @@ async function loadDailyMarketData() {
     hydrateUserStateOnce();
     renderControls();
     render();
+    void ensureWatchlistFullHistories();
     setMarketStatus(`已載入每日快取 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "ok");
     return;
   }
@@ -979,6 +1047,7 @@ async function loadDailyMarketData() {
     hydrateUserStateOnce();
     renderControls();
     render();
+    void ensureWatchlistFullHistories();
     setMarketStatus(`已更新每日資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔；美股 ${usAdded} 檔沿用本地快照，會由每日更新腳本刷新。`, "ok");
   } catch (error) {
     console.warn(error);
@@ -989,6 +1058,7 @@ async function loadDailyMarketData() {
       hydrateUserStateOnce();
       renderControls();
       render();
+      void ensureWatchlistFullHistories();
       setMarketStatus(`即時資料暫時無法載入，先使用本地快照 ${state.marketDataDate}：TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "warn");
       return;
     }
@@ -3150,6 +3220,17 @@ function bindEvents() {
     saveUserState();
     renderControls();
     render();
+    void (async () => {
+      setMarketStatus(`正在補齊 ${symbol} ${stocks[symbol]?.name || ""} 的完整歷史日線...`);
+      const ready = await ensureFullHistoryFor(symbol);
+      setMarketStatus(
+        ready
+          ? `${symbol} ${stocks[symbol]?.name || ""} 已完成完整歷史日線檢查。`
+          : `${symbol} ${stocks[symbol]?.name || ""} 完整歷史日線暫時無法載入，會保留在清單並於下次開啟時再試。`,
+        ready ? "ok" : "warn",
+      );
+      if (state.stockTrendSymbol === symbol) renderStockTrend();
+    })();
   });
 
   $("#watchlistChips").addEventListener("click", (event) => {
