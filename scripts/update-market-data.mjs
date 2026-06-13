@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -105,11 +105,12 @@ const dcaSeriesSymbols = [...new Set([...taiwanDailySeriesSymbols, ...Object.key
 const taiwanDailySeriesSet = new Set(taiwanDailySeriesSymbols);
 
 async function getJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: ${response.status}`);
+  const text = await getText(url);
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Invalid JSON from ${url}: ${text.slice(0, 80).replace(/\s+/g, " ")}`);
   }
-  return response.json();
 }
 
 async function getText(url) {
@@ -118,6 +119,16 @@ async function getText(url) {
     throw new Error(`Failed to fetch ${url}: ${response.status}`);
   }
   return response.text();
+}
+
+async function readExistingPayload() {
+  try {
+    const text = await readFile(outFile, "utf8");
+    const match = text.match(/^window\.TWSE_MARKET_DATA = (.*);\s*$/s);
+    return match ? JSON.parse(match[1]) : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseCsv(text) {
@@ -287,8 +298,9 @@ async function getHistorySnapshots(latestDate) {
   for (const [period, days] of lookbacks) {
     periods[period] = await getHistorySnapshot(period, addDaysIso(latestDate, -days));
   }
-  assertPeriodSnapshots(periods);
   const dcaSeries = await getDcaSymbolHistories(latestDate);
+  fillPeriodSnapshotsFromSeries(periods, dcaSeries);
+  assertPeriodSnapshots(periods);
   return { latestDate, periods, dcaSeries };
 }
 
@@ -328,15 +340,42 @@ function assertPeriodSnapshots(periods) {
   if (missing.length) throw new Error(`missing period symbols ${missing.slice(0, 12).join(", ")}`);
 }
 
-function taiwanDateFromTimestamp(timestamp) {
+function dateFromTimestamp(timestamp, timeZone) {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Taipei",
+    timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(new Date(timestamp * 1000));
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
+}
+
+function taiwanDateFromTimestamp(timestamp) {
+  return dateFromTimestamp(timestamp, "Asia/Taipei");
+}
+
+function marketDateFromTimestamp(symbol, timestamp) {
+  return usSymbols[symbol] ? dateFromTimestamp(timestamp, "America/New_York") : taiwanDateFromTimestamp(timestamp);
+}
+
+function pricePointOnOrBefore(points, date) {
+  for (let index = points.length - 1; index >= 0; index -= 1) {
+    if (points[index].date <= date) return points[index];
+  }
+  return null;
+}
+
+function fillPeriodSnapshotsFromSeries(periods, dcaSeries) {
+  for (const snapshot of Object.values(periods)) {
+    if (!snapshot?.closes) continue;
+    const date = snapshot.date || snapshot.targetDate;
+    for (const symbol of requiredHistorySymbols) {
+      if (snapshot.closes[symbol]) continue;
+      const point = pricePointOnOrBefore(dcaSeries?.[symbol]?.points || [], date);
+      if (point?.value > 0) snapshot.closes[symbol] = point.value;
+    }
+  }
 }
 
 function yahooSymbolFor(symbol) {
@@ -356,7 +395,7 @@ async function getYahooHistory(symbol, startDate, endDate) {
   const closes = chart?.indicators?.quote?.[0]?.close || [];
   return timestamps
     .map((timestamp, index) => ({
-      date: taiwanDateFromTimestamp(timestamp),
+      date: marketDateFromTimestamp(symbol, timestamp),
       value: toNumber(closes[index]) || toNumber(adjusted[index]),
     }))
     .filter((point) => point.date >= addDaysIso(startDate, -14) && point.date <= addDaysIso(endDate, 3) && point.value > 0)
@@ -426,19 +465,32 @@ async function getDcaSymbolHistories(latestDate) {
 
 async function getUsQuote(symbol) {
   try {
-    const stooqSymbol = symbol.replace("_", "-").toLowerCase();
-    const text = await getText(`https://stooq.com/q/l/?s=${stooqSymbol}.us&f=sd2t2ohlcv&h&e=csv`);
-    const [row] = parseCsv(text);
-    if (!row || row.Close === "N/D") return null;
+    const yahooSymbol = yahooSymbolFor(symbol);
+    const result = await getJson(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?range=10d&interval=1d`);
+    const chart = result?.chart?.result?.[0];
+    const timestamps = chart?.timestamp || [];
+    const quote = chart?.indicators?.quote?.[0] || {};
+    const rows = timestamps
+      .map((timestamp, index) => ({
+        date: marketDateFromTimestamp(symbol, timestamp),
+        open: toNumber(quote.open?.[index]),
+        high: toNumber(quote.high?.[index]),
+        low: toNumber(quote.low?.[index]),
+        close: toNumber(quote.close?.[index]),
+        volume: toNumber(quote.volume?.[index]),
+      }))
+      .filter((row) => row.close > 0);
+    const row = rows.at(-1);
+    if (!row) return null;
     return {
       symbol,
       name: usSymbols[symbol],
-      date: row.Date,
-      open: row.Open,
-      high: row.High,
-      low: row.Low,
-      close: row.Close,
-      volume: row.Volume,
+      date: row.date,
+      open: row.open,
+      high: row.high,
+      low: row.low,
+      close: row.close,
+      volume: row.volume,
     };
   } catch (error) {
     console.warn(`Skipping ${symbol}: ${error.message}`);
@@ -446,9 +498,24 @@ async function getUsQuote(symbol) {
   }
 }
 
+async function getCompanyRows(existingPayload) {
+  try {
+    const rows = await getJson(endpoints.companies);
+    if (Array.isArray(rows) && rows.length > 100) return rows;
+    throw new Error(`company endpoint returned ${Array.isArray(rows) ? rows.length : "non-array"} rows`);
+  } catch (error) {
+    if (existingPayload?.companies?.length > 100) {
+      console.warn(`Company endpoint unavailable, using existing company snapshot: ${error.message}`);
+      return existingPayload.companies;
+    }
+    throw error;
+  }
+}
+
+const existingPayload = await readExistingPayload();
 const [daily, companies, tpexCsv, usDaily] = await Promise.all([
   getTwseDailyRows(),
-  getJson(endpoints.companies),
+  getCompanyRows(existingPayload),
   getText(endpoints.tpexDaily),
   (async () => {
     const rows = [];
