@@ -113,12 +113,23 @@ async function getJson(url) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function getText(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: ${response.status}`);
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) throw new Error(`Failed to fetch ${url}: ${response.status}`);
+      return response.text();
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await sleep(750 * attempt);
+    }
   }
-  return response.text();
+  throw lastError;
 }
 
 async function readExistingPayload() {
@@ -288,7 +299,7 @@ async function getHistorySnapshot(period, targetDate) {
   return { period, targetDate, date: "", closes: {}, twseCount: 0, tpexCount: 0 };
 }
 
-async function getHistorySnapshots(latestDate) {
+async function getHistorySnapshots(latestDate, existingHistory = {}) {
   const lookbacks = [
     ["1w", 7],
     ["1m", 30],
@@ -298,7 +309,7 @@ async function getHistorySnapshots(latestDate) {
   for (const [period, days] of lookbacks) {
     periods[period] = await getHistorySnapshot(period, addDaysIso(latestDate, -days));
   }
-  const dcaSeries = await getDcaSymbolHistories(latestDate);
+  const dcaSeries = await getDcaSymbolHistories(latestDate, existingHistory.dcaSeries || {});
   fillPeriodSnapshotsFromSeries(periods, dcaSeries);
   assertPeriodSnapshots(periods);
   return { latestDate, periods, dcaSeries };
@@ -448,17 +459,36 @@ function historyStartDateFor(symbol, latestDate) {
   return addMonthsIso(latestDate.slice(0, 7) + "-01", -36);
 }
 
-async function getDcaSymbolHistories(latestDate) {
+function usableExistingSeries(existingSeries, symbol) {
+  const entry = existingSeries?.[symbol];
+  return (entry?.points || []).length >= 120 ? entry : null;
+}
+
+async function getDcaSymbolHistories(latestDate, existingSeries = {}) {
   const histories = {};
   for (const symbol of dcaSeriesSymbols) {
     const startDate = historyStartDateFor(symbol, latestDate);
     try {
       const { points, source } = await getCloseHistory(symbol, startDate, latestDate);
-      if (points.length) histories[symbol] = { symbol, startDate, endDate: latestDate, source, points };
+      if (points.length >= 120) {
+        histories[symbol] = { symbol, startDate, endDate: latestDate, source, points };
+      } else {
+        const existing = usableExistingSeries(existingSeries, symbol);
+        if (existing) {
+          histories[symbol] = existing;
+          console.warn(`Short close series for ${symbol}; using existing ${existing.points.length}-point series.`);
+        }
+      }
     } catch (error) {
-      console.warn(`No close series for ${symbol}: ${error.message}`);
+      const existing = usableExistingSeries(existingSeries, symbol);
+      if (existing) {
+        histories[symbol] = existing;
+        console.warn(`No close series for ${symbol}, using existing ${existing.points.length}-point series: ${error.message}`);
+      } else {
+        console.warn(`No close series for ${symbol}: ${error.message}`);
+      }
     }
-    await new Promise((resolve) => setTimeout(resolve, 160));
+    await sleep(160);
   }
   return histories;
 }
@@ -512,25 +542,33 @@ async function getCompanyRows(existingPayload) {
   }
 }
 
+async function getUsRows(existingPayload) {
+  const existingBySymbol = Object.fromEntries((existingPayload?.usDaily || []).map((row) => [row.symbol, row]));
+  const rows = [];
+  for (const symbol of Object.keys(usSymbols)) {
+    const row = await getUsQuote(symbol);
+    if (row) {
+      rows.push(row);
+    } else if (existingBySymbol[symbol]) {
+      rows.push(existingBySymbol[symbol]);
+      console.warn(`Using existing US quote for ${symbol}.`);
+    }
+    await sleep(160);
+  }
+  return rows;
+}
+
 const existingPayload = await readExistingPayload();
 const [daily, companies, tpexCsv, usDaily] = await Promise.all([
   getTwseDailyRows(),
   getCompanyRows(existingPayload),
   getText(endpoints.tpexDaily),
-  (async () => {
-    const rows = [];
-    for (const symbol of Object.keys(usSymbols)) {
-      const row = await getUsQuote(symbol);
-      if (row) rows.push(row);
-      await new Promise((resolve) => setTimeout(resolve, 160));
-    }
-    return rows;
-  })(),
+  getUsRows(existingPayload),
 ]);
 
 const tpexDaily = parseCsv(tpexCsv);
 const latestDate = rocDateToIso(daily?.[0]?.Date || "");
-const history = latestDate ? await getHistorySnapshots(latestDate) : { latestDate: "", periods: {} };
+const history = latestDate ? await getHistorySnapshots(latestDate, existingPayload?.history || {}) : { latestDate: "", periods: {} };
 if (latestDate) assertHistoryPayload(history);
 const payload = {
   daily,
