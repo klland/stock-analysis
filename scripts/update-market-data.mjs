@@ -120,13 +120,17 @@ function sleep(ms) {
 async function getText(url) {
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
     try {
-      const response = await fetch(url, { cache: "no-store" });
+      const response = await fetch(url, { cache: "no-store", signal: controller.signal });
       if (!response.ok) throw new Error(`Failed to fetch ${url}: ${response.status}`);
       return response.text();
     } catch (error) {
       lastError = error;
       if (attempt < 3) await sleep(750 * attempt);
+    } finally {
+      clearTimeout(timeout);
     }
   }
   throw lastError;
