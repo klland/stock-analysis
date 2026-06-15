@@ -2,12 +2,12 @@ name: Update market data
 
 on:
   schedule:
-    # GitHub Actions schedules use UTC. Run multiple times because exchange
-    # open-data endpoints can publish the latest daily file late.
-    - cron: "30 8 * * *"
-    - cron: "30 12 * * *"
-    - cron: "30 15 * * *"
-    - cron: "30 23 * * *"
+    # GitHub Actions schedules use UTC. Run hourly after the Taiwan close
+    # because GitHub cron can be delayed and TWSE/TPEx files can publish late.
+    # 08:10-15:10 UTC = 16:10-23:10 Asia/Taipei on weekdays.
+    - cron: "10 8-15 * * 1-5"
+    # Morning catch-up for any prior delayed or skipped exchange/API publish.
+    - cron: "30 23 * * 0-5"
   workflow_dispatch:
 
 permissions:
