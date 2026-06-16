@@ -145,6 +145,7 @@ const TPEX_DAILY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quote
 const TWSE_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX";
 const TPEX_HISTORY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php";
 const FINMIND_DATA_URL = "https://api.finmindtrade.com/api/v4/data";
+const REMOTE_MARKET_DATA_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-data.js";
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
 const HISTORY_CLOSE_CACHE_KEY = "decision-ledger-history-close-cache-v1";
 const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-close-cache-v2";
@@ -438,6 +439,29 @@ function normalizeMarketPayload(payload) {
     ...payload,
     date: payload.date?.includes("-") ? payload.date : rocDateToIso(payload.date || payload.daily[0]?.Date),
   };
+}
+
+function marketPayloadDate(payload) {
+  if (!payload) return "";
+  return payload.history?.latestDate || (String(payload.date || "").includes("-") ? payload.date : rocDateToIso(payload.date));
+}
+
+function isNewerMarketPayload(candidate, current) {
+  const candidateDate = marketPayloadDate(candidate);
+  const currentDate = marketPayloadDate(current);
+  if (candidateDate !== currentDate) return candidateDate > currentDate;
+  return String(candidate?.fetchedAt || "") > String(current?.fetchedAt || "");
+}
+
+function parseMarketDataScript(text) {
+  const match = String(text || "").match(/^window\.TWSE_MARKET_DATA = (.*);\s*$/s);
+  return normalizeMarketPayload(match ? JSON.parse(match[1]) : null);
+}
+
+async function fetchRemoteMarketData() {
+  const response = await fetch(`${REMOTE_MARKET_DATA_URL}?t=${Date.now()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Remote market data request failed: ${response.status}`);
+  return parseMarketDataScript(await response.text());
 }
 
 function writeCache(payload) {
@@ -838,18 +862,33 @@ async function mapWithConcurrency(items, limit, mapper) {
 }
 
 function latestTradingDate() {
-  const date = new Date();
-  date.setHours(date.getHours() - 18);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const date = new Date(`${values.year}-${values.month}-${values.day}T00:00:00+08:00`);
+  const hour = Number(values.hour);
+  if (hour < 16) date.setDate(date.getDate() - 1);
   while (date.getDay() === 0 || date.getDay() === 6) {
     date.setDate(date.getDate() - 1);
   }
-  return date.toISOString().slice(0, 10);
+  const tradingParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const tradingValues = Object.fromEntries(tradingParts.map((part) => [part.type, part.value]));
+  return `${tradingValues.year}-${tradingValues.month}-${tradingValues.day}`;
 }
 
 function isFreshMarketPayload(payload) {
-  if (!payload?.date) return false;
-  const payloadDate = payload.date.includes("-") ? payload.date : rocDateToIso(payload.date);
-  return payloadDate >= latestTradingDate();
+  return marketPayloadDate(payload) >= latestTradingDate();
 }
 
 async function fetchMarketData() {
@@ -1008,30 +1047,42 @@ function applyUsMarketData(payload) {
   return added;
 }
 
+function applyMarketPayload(payload) {
+  const added = applyTwseMarketData(payload);
+  const tpexAdded = applyTpexMarketData(payload);
+  const usAdded = applyUsMarketData(payload);
+  hydrateUserStateOnce();
+  renderControls();
+  render();
+  void ensureWatchlistFullHistories();
+  return { added, tpexAdded, usAdded };
+}
+
 async function loadDailyMarketData() {
   const today = new Date().toISOString().slice(0, 10);
   const bundled = normalizeMarketPayload(window.TWSE_MARKET_DATA);
+  try {
+    setMarketStatus("正在檢查 GitHub 最新完整資料...");
+    const remote = await fetchRemoteMarketData();
+    if (remote?.fetchedAt && (!bundled?.fetchedAt || isNewerMarketPayload(remote, bundled))) {
+      const { added, tpexAdded, usAdded } = applyMarketPayload(remote);
+      writeCache({ ...remote, cachedAt: today });
+      setMarketStatus(`已載入 GitHub 最新完整資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "ok");
+      return;
+    }
+  } catch (error) {
+    console.warn(`Remote market data unavailable: ${error.message}`);
+  }
+
   if (bundled?.fetchedAt && isFreshMarketPayload(bundled)) {
-    const added = applyTwseMarketData(bundled);
-    const tpexAdded = applyTpexMarketData(bundled);
-    const usAdded = applyUsMarketData(bundled);
-    hydrateUserStateOnce();
-    renderControls();
-    render();
-    void ensureWatchlistFullHistories();
+    const { added, tpexAdded, usAdded } = applyMarketPayload(bundled);
     setMarketStatus(`已載入本地每日資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔；排程會每天收盤後更新。`, "ok");
     return;
   }
 
   const cache = readCache();
   if (cache?.cachedAt === today) {
-    const added = applyTwseMarketData(cache);
-    const tpexAdded = applyTpexMarketData(cache);
-    const usAdded = applyUsMarketData(cache);
-    hydrateUserStateOnce();
-    renderControls();
-    render();
-    void ensureWatchlistFullHistories();
+    const { added, tpexAdded, usAdded } = applyMarketPayload(cache);
     setMarketStatus(`已載入每日快取 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "ok");
     return;
   }
@@ -1041,24 +1092,12 @@ async function loadDailyMarketData() {
     const payload = await fetchMarketData();
     const cachePayload = { ...payload, usDaily: bundled?.usDaily || cache?.usDaily || [], cachedAt: today };
     writeCache(cachePayload);
-    const added = applyTwseMarketData(cachePayload);
-    const tpexAdded = applyTpexMarketData(cachePayload);
-    const usAdded = applyUsMarketData(cachePayload);
-    hydrateUserStateOnce();
-    renderControls();
-    render();
-    void ensureWatchlistFullHistories();
+    const { added, tpexAdded, usAdded } = applyMarketPayload(cachePayload);
     setMarketStatus(`已更新每日資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔；美股 ${usAdded} 檔沿用本地快照，會由每日更新腳本刷新。`, "ok");
   } catch (error) {
     console.warn(error);
     if (bundled?.fetchedAt) {
-      const added = applyTwseMarketData(bundled);
-      const tpexAdded = applyTpexMarketData(bundled);
-      const usAdded = applyUsMarketData(bundled);
-      hydrateUserStateOnce();
-      renderControls();
-      render();
-      void ensureWatchlistFullHistories();
+      const { added, tpexAdded, usAdded } = applyMarketPayload(bundled);
       setMarketStatus(`即時資料暫時無法載入，先使用本地快照 ${state.marketDataDate}：TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "warn");
       return;
     }
