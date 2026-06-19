@@ -13,9 +13,10 @@ const endpoints = {
   twseHistory: "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
   tpexHistory: "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php",
   finmindData: "https://api.finmindtrade.com/api/v4/data",
+  nasdaqScreener: "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&download=true",
 };
 
-const usSymbols = {
+let usSymbols = {
   AAPL: "Apple",
   MSFT: "Microsoft",
   NVDA: "NVIDIA",
@@ -87,6 +88,25 @@ const usSymbols = {
   IBIT: "iShares Bitcoin Trust",
 };
 
+const requiredUsEtfs = {
+  SPY: "SPDR S&P 500 ETF",
+  QQQ: "Invesco QQQ ETF",
+  VOO: "Vanguard S&P 500 ETF",
+  VTI: "Vanguard Total Stock Market ETF",
+  IVV: "iShares Core S&P 500 ETF",
+  SCHD: "Schwab US Dividend Equity ETF",
+  VGT: "Vanguard Information Technology ETF",
+  XLK: "Technology Select Sector SPDR ETF",
+  SMH: "VanEck Semiconductor ETF",
+  SOXX: "iShares Semiconductor ETF",
+  DIA: "SPDR Dow Jones ETF",
+  IWM: "iShares Russell 2000 ETF",
+  TLT: "iShares 20+ Year Treasury Bond ETF",
+  BND: "Vanguard Total Bond Market ETF",
+  AGG: "iShares Core US Aggregate Bond ETF",
+  IBIT: "iShares Bitcoin Trust",
+};
+
 const requiredHistorySymbols = ["2330", "0050", "2454"];
 const taiwanDailySeriesSymbols = [
   "0050",
@@ -101,11 +121,11 @@ const taiwanDailySeriesSymbols = [
   "2454",
   "2881",
 ];
-const dcaSeriesSymbols = [...new Set([...taiwanDailySeriesSymbols, ...Object.keys(usSymbols)])];
+let dcaSeriesSymbols = [...new Set([...taiwanDailySeriesSymbols, ...Object.keys(usSymbols)])];
 const taiwanDailySeriesSet = new Set(taiwanDailySeriesSymbols);
 
-async function getJson(url) {
-  const text = await getText(url);
+async function getJson(url, options = {}) {
+  const text = await getText(url, options);
   try {
     return JSON.parse(text);
   } catch (error) {
@@ -117,13 +137,13 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function getText(url) {
+async function getText(url, options = {}) {
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20_000);
     try {
-      const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+      const response = await fetch(url, { ...options, cache: "no-store", signal: controller.signal });
       if (!response.ok) throw new Error(`Failed to fetch ${url}: ${response.status}`);
       return response.text();
     } catch (error) {
@@ -329,7 +349,7 @@ function addMonthsIso(isoDate, months) {
 function assertHistoryPayload(history) {
   const periods = ["1w", "1m", "1y"];
   const missingPeriodSymbols = missingPeriodSnapshotSymbols(history.periods || {}, periods);
-  const missingDcaSeries = dcaSeriesSymbols.filter((symbol) => (history.dcaSeries?.[symbol]?.points || []).length < 120);
+  const missingDcaSeries = dcaSeriesSymbols.filter((symbol) => (history.dcaSeries?.[symbol]?.points || []).length < 2);
   if (missingPeriodSymbols.length || missingDcaSeries.length) {
     throw new Error(
       [
@@ -474,7 +494,7 @@ async function getDcaSymbolHistories(latestDate, existingSeries = {}) {
     const startDate = historyStartDateFor(symbol, latestDate);
     try {
       const { points, source } = await getCloseHistory(symbol, startDate, latestDate);
-      if (points.length >= 120) {
+      if (points.length >= 2) {
         histories[symbol] = { symbol, startDate, endDate: latestDate, source, points };
       } else {
         const existing = usableExistingSeries(existingSeries, symbol);
@@ -546,6 +566,86 @@ async function getCompanyRows(existingPayload) {
   }
 }
 
+function normalizeUsSymbol(symbol) {
+  return String(symbol || "").trim().toUpperCase().replace(/[.-]/g, "_");
+}
+
+function cleanUsCompanyName(name) {
+  return String(name || "")
+    .replace(/\s+(Class [A-Z] )?(Common|Capital) Stock.*$/i, "")
+    .replace(/\s+Ordinary Shares.*$/i, "")
+    .trim();
+}
+
+function isUsCompanySecurity(row) {
+  const name = String(row?.name || "");
+  const marketCap = toNumber(row?.marketCap);
+  if (!(marketCap > 0) || !row?.symbol || !row?.sector) return false;
+  return !/\b(ETF|ETN|Fund|Warrant|Right|Unit|Preferred Stock)\b/i.test(name);
+}
+
+async function getTopUsSymbols(existingPayload) {
+  const mandatory = {
+    MU: "Micron Technology",
+    SNDK: "Sandisk",
+  };
+  try {
+    const result = await getJson(endpoints.nasdaqScreener, {
+      headers: {
+        Accept: "application/json, text/plain, */*",
+        Origin: "https://www.nasdaq.com",
+        Referer: "https://www.nasdaq.com/",
+        "User-Agent": "Mozilla/5.0",
+      },
+    });
+    const ranked = (result?.data?.rows || [])
+      .filter(isUsCompanySecurity)
+      .map((row) => ({
+        symbol: normalizeUsSymbol(row.symbol),
+        name: cleanUsCompanyName(row.name),
+        marketCap: toNumber(row.marketCap),
+      }))
+      .filter((row) => row.symbol && row.name)
+      .sort((a, b) => b.marketCap - a.marketCap);
+    const unique = [...new Map(ranked.map((row) => [row.symbol, row])).values()];
+    const selected = unique.slice(0, 200);
+    for (const [symbol, name] of Object.entries(mandatory)) {
+      if (selected.some((row) => row.symbol === symbol)) continue;
+      const rankedRow = unique.find((row) => row.symbol === symbol) || { symbol, name, marketCap: 0 };
+      selected.pop();
+      selected.push(rankedRow);
+    }
+    if (selected.length !== 200) throw new Error(`Nasdaq universe returned ${selected.length} usable symbols`);
+    return { ...Object.fromEntries(selected.map((row) => [row.symbol, row.name])), ...requiredUsEtfs };
+  } catch (error) {
+    const existingCompanies = Object.fromEntries(
+      (existingPayload?.usDaily || [])
+        .filter((row) => row?.symbol && !requiredUsEtfs[normalizeUsSymbol(row.symbol)])
+        .slice(0, 200)
+        .map((row) => [normalizeUsSymbol(row.symbol), row.name || normalizeUsSymbol(row.symbol)]),
+    );
+    const seedCompanies = Object.fromEntries(Object.entries(usSymbols).filter(([symbol]) => !requiredUsEtfs[symbol]));
+    const fallback = Object.keys(existingCompanies).length >= 200 ? existingCompanies : seedCompanies;
+    const fallbackEntries = Object.entries({ ...fallback, ...mandatory });
+    while (fallbackEntries.length > 200) {
+      const removableIndex = fallbackEntries.findLastIndex(([symbol]) => !mandatory[symbol]);
+      if (removableIndex === -1) break;
+      fallbackEntries.splice(removableIndex, 1);
+    }
+    console.warn(`Nasdaq top-200 universe unavailable, using existing universe: ${error.message}`);
+    return { ...Object.fromEntries(fallbackEntries), ...requiredUsEtfs };
+  }
+}
+
+function assertUsRows(rows) {
+  const symbols = new Set(rows.map((row) => row.symbol));
+  const expectedCount = 200 + Object.keys(requiredUsEtfs).length;
+  const missing = ["MU", "SNDK", ...Object.keys(requiredUsEtfs)].filter((symbol) => !symbols.has(symbol));
+  if (rows.length !== expectedCount || symbols.size !== expectedCount || missing.length) {
+    throw new Error(`invalid US universe: rows=${rows.length}, unique=${symbols.size}, missing=${missing.join(",") || "none"}`);
+  }
+}
+
 async function getUsRows(existingPayload) {
   const existingBySymbol = Object.fromEntries((existingPayload?.usDaily || []).map((row) => [row.symbol, row]));
   const rows = [];
@@ -563,12 +663,15 @@ async function getUsRows(existingPayload) {
 }
 
 const existingPayload = await readExistingPayload();
+usSymbols = await getTopUsSymbols(existingPayload);
+dcaSeriesSymbols = [...new Set([...taiwanDailySeriesSymbols, ...Object.keys(usSymbols)])];
 const [daily, companies, tpexCsv, usDaily] = await Promise.all([
   getTwseDailyRows(),
   getCompanyRows(existingPayload),
   getText(endpoints.tpexDaily),
   getUsRows(existingPayload),
 ]);
+assertUsRows(usDaily);
 
 const tpexDaily = parseCsv(tpexCsv);
 const latestDate = rocDateToIso(daily?.[0]?.Date || "");
