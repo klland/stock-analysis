@@ -138,6 +138,48 @@ main {
   color: var(--muted);
 }
 
+.toolbar-actions {
+  justify-content: flex-end;
+}
+
+.data-freshness {
+  display: grid;
+  min-width: 13rem;
+  gap: 0.15rem;
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid var(--accent);
+  background: #f2f7f4;
+}
+
+.data-freshness strong {
+  font-size: 0.9rem;
+}
+
+.data-freshness small {
+  font-size: 0.74rem;
+}
+
+.benchmark-control {
+  display: grid;
+  gap: 0.28rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.benchmark-control select {
+  min-width: 10rem;
+}
+
+.refresh-data {
+  background: #18201b;
+  white-space: nowrap;
+}
+
+.refresh-data:hover {
+  background: #0f766e;
+}
+
 .inline-controls label {
   color: var(--muted);
   font-size: 0.88rem;
@@ -489,6 +531,73 @@ td:last-child {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.75rem;
   margin-top: 1rem;
+}
+
+.watchlist-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.6rem;
+  align-items: center;
+  min-height: 4.75rem;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfcfb;
+}
+
+.watchlist-card:hover {
+  border-color: #9bcabf;
+  box-shadow: 0 8px 20px rgba(15, 118, 110, 0.08);
+}
+
+.watchlist-stock {
+  display: grid;
+  min-height: 0;
+  gap: 0.25rem;
+  padding: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.watchlist-stock:hover {
+  background: transparent;
+  color: var(--accent-dark);
+}
+
+.watchlist-stock strong,
+.watchlist-quote strong {
+  font-size: 0.96rem;
+}
+
+.watchlist-stock small,
+.watchlist-quote small {
+  font-size: 0.73rem;
+  font-weight: 700;
+}
+
+.watchlist-quote {
+  display: grid;
+  gap: 0.2rem;
+  text-align: right;
+}
+
+.watchlist-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+}
+
+.watchlist-remove:hover {
+  background: #fff1ef;
+  color: var(--negative);
 }
 
 .selected-chip,
@@ -935,6 +1044,17 @@ code {
     width: 100%;
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .data-freshness,
+  .benchmark-control,
+  .benchmark-control select,
+  .refresh-data {
+    width: 100%;
+  }
+
+  .watchlist-card {
+    grid-template-columns: minmax(0, 1fr) auto auto;
   }
 
   .inline-controls input,

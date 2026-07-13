@@ -27,8 +27,8 @@
           <a href="#architecture">資料與 API</a>
         </nav>
         <div class="data-note">
-          <strong>示範版資料</strong>
-          <span>內建台股價格、成交量、市值與類股樣本；下一階段可接 FinMind 或證交所 API。</span>
+          <strong>市場資料狀態</strong>
+          <span id="sidebarDataNote">正在確認最新收盤資料</span>
         </div>
       </aside>
 
@@ -39,8 +39,14 @@
             <h2>輸入真實交易，檢查決策品質</h2>
           </div>
           <div class="toolbar-actions">
-            <label for="benchmarkSelect">假設比較標的</label>
-            <select id="benchmarkSelect"></select>
+            <div class="data-freshness" aria-live="polite">
+              <strong id="dataFreshness">資料準備中</strong>
+              <small id="dataDetail">正在載入市場報價</small>
+            </div>
+            <label class="benchmark-control" for="benchmarkSelect">比較標的
+              <select id="benchmarkSelect"></select>
+            </label>
+            <button id="refreshDataButton" class="refresh-data" type="button">更新資料</button>
           </div>
         </section>
         <div id="marketStatus" class="market-status">正在準備市場資料...</div>
@@ -575,7 +581,7 @@
       </main>
     </div>
 
-    <script src="data/market-data.js?v=20260619-us-top-200"></script>
-    <script src="app.js?v=20260616-remote-market-data-sync"></script>
+    <script src="data/market-data.js?v=20260713-fast-dashboard"></script>
+    <script src="app.js?v=20260713-fast-dashboard"></script>
   </body>
 </html>

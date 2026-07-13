@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outFile = resolve(root, "data", "market-data.js");
+const historyOutFile = resolve(root, "data", "market-history.js");
 
 const endpoints = {
   daily: "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data",
@@ -158,9 +159,15 @@ async function getText(url, options = {}) {
 
 async function readExistingPayload() {
   try {
-    const text = await readFile(outFile, "utf8");
-    const match = text.match(/^window\.TWSE_MARKET_DATA = (.*);\s*$/s);
-    return match ? JSON.parse(match[1]) : null;
+    const [marketText, historyText] = await Promise.all([
+      readFile(outFile, "utf8"),
+      readFile(historyOutFile, "utf8").catch(() => ""),
+    ]);
+    const marketMatch = marketText.match(/^window\.TWSE_MARKET_DATA = (.*);\s*$/s);
+    const historyMatch = historyText.match(/^window\.TWSE_MARKET_HISTORY = (.*);\s*$/s);
+    const market = marketMatch ? JSON.parse(marketMatch[1]) : null;
+    const history = historyMatch ? JSON.parse(historyMatch[1]) : null;
+    return market ? { ...market, history: history?.history || market.history || {} } : null;
   } catch {
     return null;
   }
@@ -682,10 +689,23 @@ const payload = {
   companies,
   tpexDaily,
   usDaily,
-  history,
+  // Keep the first payload small: it powers the dashboard, rankings, and quotes.
+  // The multi-year daily series is emitted separately and loaded only when needed.
+  history: {
+    latestDate: history.latestDate,
+    periods: history.periods,
+  },
   fetchedAt: new Date().toISOString(),
   date: daily?.[0]?.Date || "",
   source: endpoints,
+};
+const historyPayload = {
+  date: payload.date,
+  fetchedAt: payload.fetchedAt,
+  history: {
+    latestDate: history.latestDate,
+    dcaSeries: history.dcaSeries || {},
+  },
 };
 
 await mkdir(dirname(outFile), { recursive: true });
@@ -694,7 +714,12 @@ await writeFile(
   `window.TWSE_MARKET_DATA = ${JSON.stringify(payload)};\n`,
   "utf8",
 );
+await writeFile(
+  historyOutFile,
+  `window.TWSE_MARKET_HISTORY = ${JSON.stringify(historyPayload)};\n`,
+  "utf8",
+);
 
 console.log(
-  `Wrote ${outFile} with ${daily.length} TWSE rows, ${tpexDaily.length} TPEx rows, ${companies.length} company rows, ${payload.usDaily.length} US rows, ${Object.keys(history.periods).length} history snapshots, and ${Object.keys(history.dcaSeries || {}).length} DCA daily series.`,
+  `Wrote market summary and history files with ${daily.length} TWSE rows, ${tpexDaily.length} TPEx rows, ${companies.length} company rows, ${payload.usDaily.length} US rows, ${Object.keys(history.periods).length} history snapshots, and ${Object.keys(history.dcaSeries || {}).length} daily series.`,
 );

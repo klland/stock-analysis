@@ -146,6 +146,8 @@ const TWSE_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX";
 const TPEX_HISTORY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php";
 const FINMIND_DATA_URL = "https://api.finmindtrade.com/api/v4/data";
 const REMOTE_MARKET_DATA_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-data.js";
+const REMOTE_MARKET_HISTORY_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-history.js";
+const LOCAL_MARKET_HISTORY_URL = "data/market-history.js?v=20260713-fast-dashboard";
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
 const HISTORY_CLOSE_CACHE_KEY = "decision-ledger-history-close-cache-v1";
 const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-close-cache-v2";
@@ -153,6 +155,8 @@ const ADJUSTED_HISTORY_CACHE_KEY = "decision-ledger-close-history-cache-v2";
 let marketHistoryPeriods = {};
 let marketDcaSnapshots = {};
 let marketDcaSeries = {};
+let marketHistoryReady = false;
+let marketHistoryLoadPromise = null;
 const USER_STATE_KEY = "decision-ledger-user-state-v1";
 const usEtfSymbols = new Set(["SPY", "QQQ", "VOO", "VTI", "IVV", "SCHD", "VGT", "XLK", "SMH", "SOXX", "DIA", "IWM", "TLT", "BND", "AGG", "IBIT"]);
 let userStateLoaded = false;
@@ -458,10 +462,33 @@ function parseMarketDataScript(text) {
   return normalizeMarketPayload(match ? JSON.parse(match[1]) : null);
 }
 
+function parseMarketHistoryScript(text) {
+  const match = String(text || "").match(/^window\.TWSE_MARKET_HISTORY = (.*);\s*$/s);
+  return match ? JSON.parse(match[1]) : null;
+}
+
 async function fetchRemoteMarketData() {
   const response = await fetch(`${REMOTE_MARKET_DATA_URL}?t=${Date.now()}`, { cache: "no-store" });
   if (!response.ok) throw new Error(`Remote market data request failed: ${response.status}`);
   return parseMarketDataScript(await response.text());
+}
+
+async function fetchRemoteMarketHistory() {
+  const response = await fetch(`${REMOTE_MARKET_HISTORY_URL}?t=${Date.now()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Remote market history request failed: ${response.status}`);
+  return parseMarketHistoryScript(await response.text());
+}
+
+function loadLocalMarketHistoryScript() {
+  if (window.TWSE_MARKET_HISTORY) return Promise.resolve(window.TWSE_MARKET_HISTORY);
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = LOCAL_MARKET_HISTORY_URL;
+    script.async = true;
+    script.onload = () => resolve(window.TWSE_MARKET_HISTORY || null);
+    script.onerror = () => reject(new Error("Local market history script unavailable"));
+    document.head.append(script);
+  });
 }
 
 function writeCache(payload) {
@@ -908,9 +935,12 @@ async function fetchMarketData() {
 
 function applyTwseMarketData(payload) {
   const companyMap = new Map(payload.companies.map((item) => [item["公司代號"], item]));
-  marketHistoryPeriods = payload.history?.periods || {};
-  marketDcaSnapshots = payload.history?.dcaMonthly || {};
-  marketDcaSeries = payload.history?.dcaSeries || {};
+  marketHistoryPeriods = payload.history?.periods || marketHistoryPeriods;
+  marketDcaSnapshots = payload.history?.dcaMonthly || marketDcaSnapshots;
+  if (Object.keys(payload.history?.dcaSeries || {}).length) {
+    marketDcaSeries = payload.history.dcaSeries;
+    marketHistoryReady = true;
+  }
   let added = 0;
 
   payload.daily.forEach((row) => {
@@ -1054,34 +1084,105 @@ function applyMarketPayload(payload) {
   hydrateUserStateOnce();
   renderControls();
   render();
-  void ensureWatchlistFullHistories();
+  renderDataSummary();
+  scheduleMarketHistoryLoad();
   return { added, tpexAdded, usAdded };
+}
+
+function applyMarketHistory(payload) {
+  const history = payload?.history || payload;
+  if (!history || !Object.keys(history.dcaSeries || {}).length) return false;
+  marketHistoryPeriods = { ...marketHistoryPeriods, ...(history.periods || {}) };
+  marketDcaSnapshots = { ...marketDcaSnapshots, ...(history.dcaMonthly || {}) };
+  marketDcaSeries = history.dcaSeries;
+  marketHistoryReady = true;
+  renderDataSummary();
+  renderDcaEngine();
+  renderConditionalEngine();
+  renderStockTrend();
+  renderHotStocks();
+  return true;
+}
+
+function scheduleMarketHistoryLoad() {
+  if (marketHistoryReady || marketHistoryLoadPromise) return;
+  const start = () => {
+    void loadMarketHistory();
+  };
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(start, { timeout: 1800 });
+  } else {
+    window.setTimeout(start, 450);
+  }
+}
+
+async function loadMarketHistory() {
+  if (marketHistoryReady) return true;
+  if (marketHistoryLoadPromise) return marketHistoryLoadPromise;
+  marketHistoryLoadPromise = (async () => {
+    try {
+      const local = await loadLocalMarketHistoryScript();
+      if (applyMarketHistory(local)) return true;
+    } catch (error) {
+      console.warn(`Local market history unavailable: ${error.message}`);
+    }
+    try {
+      const remote = await fetchRemoteMarketHistory();
+      return applyMarketHistory(remote);
+    } catch (error) {
+      console.warn(`Remote market history unavailable: ${error.message}`);
+      return false;
+    } finally {
+      marketHistoryLoadPromise = null;
+    }
+  })();
+  return marketHistoryLoadPromise;
+}
+
+function renderDataSummary() {
+  const date = state.marketDataDate || "--";
+  const historyState = marketHistoryReady ? "歷史日線已就緒" : "歷史日線背景載入中";
+  const freshness = $("#dataFreshness");
+  const detail = $("#dataDetail");
+  const sidebarNote = $("#sidebarDataNote");
+  if (freshness) freshness.textContent = `資料日 ${date}`;
+  if (detail) detail.textContent = `${historyState} · 台股與美股收盤價`;
+  if (sidebarNote) sidebarNote.textContent = `${date} · ${historyState}`;
 }
 
 async function loadDailyMarketData() {
   const today = new Date().toISOString().slice(0, 10);
   const bundled = normalizeMarketPayload(window.TWSE_MARKET_DATA);
+  const cache = readCache();
+  const initial = [bundled, cache].filter(Boolean).sort((a, b) => (isNewerMarketPayload(a, b) ? -1 : 1))[0];
+  if (initial) {
+    const { added, tpexAdded, usAdded } = applyMarketPayload(initial);
+    setMarketStatus(`已先顯示 ${state.marketDataDate} 的可用資料，正在背景確認今日更新。TWSE ${added}、TPEx ${tpexAdded}、美股 ${usAdded} 檔。`, "ok");
+  }
   try {
-    setMarketStatus("正在檢查 GitHub 最新完整資料...");
+    setMarketStatus("正在確認 GitHub 的最新收盤資料...");
     const remote = await fetchRemoteMarketData();
-    if (remote?.fetchedAt && (!bundled?.fetchedAt || isNewerMarketPayload(remote, bundled))) {
+    if (remote?.fetchedAt && (!initial?.fetchedAt || isNewerMarketPayload(remote, initial))) {
       const { added, tpexAdded, usAdded } = applyMarketPayload(remote);
       writeCache({ ...remote, cachedAt: today });
-      setMarketStatus(`已載入 GitHub 最新完整資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "ok");
+      setMarketStatus(`已更新至 ${state.marketDataDate} 收盤資料。TWSE ${added}、TPEx ${tpexAdded}、美股 ${usAdded} 檔；歷史分析會在背景完成。`, "ok");
+      return;
+    }
+    if (initial) {
+      setMarketStatus(`資料已是最新可用版本：${state.marketDataDate}。歷史分析會在背景完成。`, "ok");
       return;
     }
   } catch (error) {
     console.warn(`Remote market data unavailable: ${error.message}`);
   }
 
-  if (bundled?.fetchedAt && isFreshMarketPayload(bundled)) {
+  if (!initial && bundled?.fetchedAt && isFreshMarketPayload(bundled)) {
     const { added, tpexAdded, usAdded } = applyMarketPayload(bundled);
     setMarketStatus(`已載入本地每日資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔；排程會每天收盤後更新。`, "ok");
     return;
   }
 
-  const cache = readCache();
-  if (cache?.cachedAt === today) {
+  if (!initial && cache?.cachedAt === today) {
     const { added, tpexAdded, usAdded } = applyMarketPayload(cache);
     setMarketStatus(`已載入每日快取 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "ok");
     return;
@@ -2355,14 +2456,23 @@ function drawBarChart(canvas, rows) {
 
 function renderWatchlist() {
   $("#watchlistChips").innerHTML = visibleSymbols()
-    .map(
-      (symbol) => `
-        <span class="selected-chip">
-          ${symbol} ${stocks[symbol].name}
-          <button type="button" aria-label="刪除 ${symbol}" data-remove-watchlist="${symbol}">×</button>
-        </span>
-      `,
-    )
+    .map((symbol) => {
+      const stock = stocks[symbol];
+      const returnRate = stock.dailyReturn;
+      return `
+        <article class="watchlist-card">
+          <button class="watchlist-stock" type="button" data-select-stock="${symbol}">
+            <strong>${symbol} ${stock.name}</strong>
+            <small>${stock.market} · ${stock.sector}</small>
+          </button>
+          <div class="watchlist-quote">
+            <strong>${priceFormat.format(latestPrice(symbol))}</strong>
+            <small class="${classForReturn(returnRate)}">${returnRate >= 0 ? "+" : ""}${percent.format(returnRate)} 今日</small>
+          </div>
+          <button class="watchlist-remove" type="button" aria-label="刪除 ${symbol}" data-remove-watchlist="${symbol}">×</button>
+        </article>
+      `;
+    })
     .join("");
 }
 
@@ -2718,6 +2828,17 @@ async function renderCompareEngine() {
 
 async function renderDcaEngine() {
   const token = ++dcaRenderToken;
+  if (!marketHistoryReady) {
+    $("#dcaBasis").textContent = "歷史日線正在背景載入；完成後會自動計算投入、年化報酬與最大跌幅。";
+    ["#dcaInvested", "#dcaValue", "#dcaReturn", "#dcaMdd"].forEach((selector) => {
+      $(selector).textContent = "載入中";
+      $(selector).className = "";
+    });
+    drawLineChart($("#dcaChart"), []);
+    $("#dcaLegend").innerHTML = "";
+    $("#dcaResults").innerHTML = `<div class="rank-row"><strong>正在準備完整歷史日線</strong><small>每日報價已可使用，回測資料完成後會自動顯示。</small></div>`;
+    return;
+  }
   if (state.dcaStartDate > state.dcaEndDate) {
     $("#dcaBasis").textContent = "日期區間錯誤：開始日期必須早於結束日期。";
     $("#dcaInvested").textContent = "--";
@@ -2846,6 +2967,17 @@ async function renderDcaEngine() {
 }
 
 function renderConditionalEngine() {
+  if (!marketHistoryReady) {
+    $("#conditionalBasis").textContent = "歷史日線正在背景載入；完成後會自動計算觸發買入策略。";
+    ["#conditionalInvested", "#conditionalValue", "#conditionalReturn", "#conditionalTrades"].forEach((selector) => {
+      $(selector).textContent = "載入中";
+      $(selector).className = "";
+    });
+    drawLineChart($("#conditionalChart"), []);
+    $("#conditionalLegend").innerHTML = "";
+    $("#conditionalResults").innerHTML = `<div class="rank-row"><strong>正在準備完整歷史日線</strong><small>完成後會自動執行策略回測。</small></div>`;
+    return;
+  }
   if (state.conditionalStartDate > state.conditionalEndDate) {
     $("#conditionalBasis").textContent = "日期區間錯誤：開始日期必須早於結束日期。";
     $("#conditionalInvested").textContent = "--";
@@ -3101,6 +3233,17 @@ async function renderStockTrend() {
   $("#stockTrendLow").textContent = "--";
   $("#stockTrendVolume").textContent = "--";
   $("#stockTrendTradeValue").textContent = "--";
+  if (!marketHistoryReady) {
+    const latest = latestPrice(symbol);
+    $("#stockTrendLatest").textContent = latest > 0 ? priceFormat.format(latest) : "--";
+    $("#stockTrendReturn").textContent = `${stock.dailyReturn >= 0 ? "+" : ""}${percent.format(stock.dailyReturn)} 今日`;
+    $("#stockTrendReturn").className = `apple-change ${classForReturn(stock.dailyReturn)}`.trim();
+    $("#stockTrendVolume").textContent = formatVolume(stock.volume);
+    $("#stockTrendTradeValue").textContent = formatMarketCap(stock.tradeValue || 0);
+    $("#stockTrendNote").textContent = "已顯示當日收盤價，完整日線正在背景載入。";
+    drawPriceChart($("#stockTrendChart"), []);
+    return;
+  }
   drawPriceChart($("#stockTrendChart"), []);
   stockTrendChartState = { points: [], hoverIndex: null, symbol, baseValue: 0 };
 
@@ -3222,6 +3365,10 @@ function render() {
 }
 
 function bindEvents() {
+  $("#refreshDataButton")?.addEventListener("click", () => {
+    setMarketStatus("正在重新確認當日收盤資料...");
+    void loadDailyMarketData();
+  });
   $("#benchmarkSelect").addEventListener("change", (event) => {
     state.benchmark = event.target.value;
     saveUserState();
