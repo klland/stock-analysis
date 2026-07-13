@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outFile = resolve(root, "data", "market-data.js");
 const historyOutFile = resolve(root, "data", "market-history.js");
+const manifestOutFile = resolve(root, "data", "market-manifest.js");
 
 const endpoints = {
   daily: "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data",
@@ -495,23 +496,45 @@ function usableExistingSeries(existingSeries, symbol) {
   return (entry?.points || []).length >= 120 ? entry : null;
 }
 
+function mergeHistoryPoints(existingPoints, freshPoints) {
+  return Object.values(
+    Object.fromEntries(
+      [...existingPoints, ...freshPoints]
+        .filter((point) => point?.date && point.value > 0)
+        .map((point) => [point.date, point]),
+    ),
+  ).sort((a, b) => a.date.localeCompare(b.date));
+}
+
 async function getDcaSymbolHistories(latestDate, existingSeries = {}) {
   const histories = {};
   for (const symbol of dcaSeriesSymbols) {
-    const startDate = historyStartDateFor(symbol, latestDate);
+    const existing = usableExistingSeries(existingSeries, symbol);
+    const existingLastDate = existing?.points?.at(-1)?.date || "";
+    if (existingLastDate >= latestDate) {
+      histories[symbol] = existing;
+      continue;
+    }
+
+    const startDate = existingLastDate ? addDaysIso(existingLastDate, -14) : historyStartDateFor(symbol, latestDate);
     try {
       const { points, source } = await getCloseHistory(symbol, startDate, latestDate);
-      if (points.length >= 2) {
-        histories[symbol] = { symbol, startDate, endDate: latestDate, source, points };
+      const mergedPoints = existing ? mergeHistoryPoints(existing.points, points) : points;
+      if (mergedPoints.length >= 2) {
+        histories[symbol] = {
+          symbol,
+          startDate: existing?.startDate || historyStartDateFor(symbol, latestDate),
+          endDate: latestDate,
+          source: existing ? `${existing.source}; incremental ${source}` : source,
+          points: mergedPoints,
+        };
       } else {
-        const existing = usableExistingSeries(existingSeries, symbol);
         if (existing) {
           histories[symbol] = existing;
           console.warn(`Short close series for ${symbol}; using existing ${existing.points.length}-point series.`);
         }
       }
     } catch (error) {
-      const existing = usableExistingSeries(existingSeries, symbol);
       if (existing) {
         histories[symbol] = existing;
         console.warn(`No close series for ${symbol}, using existing ${existing.points.length}-point series: ${error.message}`);
@@ -707,6 +730,14 @@ const historyPayload = {
     dcaSeries: history.dcaSeries || {},
   },
 };
+const manifest = {
+  version: payload.fetchedAt,
+  dataDate: history.latestDate,
+  summary: "market-data.js",
+  history: "market-history.js",
+  usSymbols: payload.usDaily.length,
+  historySeries: Object.keys(history.dcaSeries || {}).length,
+};
 
 await mkdir(dirname(outFile), { recursive: true });
 await writeFile(
@@ -719,7 +750,12 @@ await writeFile(
   `window.TWSE_MARKET_HISTORY = ${JSON.stringify(historyPayload)};\n`,
   "utf8",
 );
+await writeFile(
+  manifestOutFile,
+  `window.TWSE_MARKET_MANIFEST = ${JSON.stringify(manifest)};\n`,
+  "utf8",
+);
 
 console.log(
-  `Wrote market summary and history files with ${daily.length} TWSE rows, ${tpexDaily.length} TPEx rows, ${companies.length} company rows, ${payload.usDaily.length} US rows, ${Object.keys(history.periods).length} history snapshots, and ${Object.keys(history.dcaSeries || {}).length} daily series.`,
+  `Wrote market manifest, summary, and history files with ${daily.length} TWSE rows, ${tpexDaily.length} TPEx rows, ${companies.length} company rows, ${payload.usDaily.length} US rows, ${Object.keys(history.periods).length} history snapshots, and ${Object.keys(history.dcaSeries || {}).length} daily series.`,
 );

@@ -145,9 +145,10 @@ const TPEX_DAILY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quote
 const TWSE_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX";
 const TPEX_HISTORY_URL = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php";
 const FINMIND_DATA_URL = "https://api.finmindtrade.com/api/v4/data";
+const REMOTE_MARKET_MANIFEST_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-manifest.js";
 const REMOTE_MARKET_DATA_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-data.js";
 const REMOTE_MARKET_HISTORY_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-history.js";
-const LOCAL_MARKET_HISTORY_URL = "data/market-history.js?v=20260713-fast-dashboard";
+const LOCAL_MARKET_HISTORY_URL = "data/market-history.js?v=20260714-manifest";
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
 const HISTORY_CLOSE_CACHE_KEY = "decision-ledger-history-close-cache-v1";
 const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-close-cache-v2";
@@ -157,6 +158,8 @@ let marketDcaSnapshots = {};
 let marketDcaSeries = {};
 let marketHistoryReady = false;
 let marketHistoryLoadPromise = null;
+let marketDataVersion = "";
+let marketManifest = null;
 const USER_STATE_KEY = "decision-ledger-user-state-v1";
 const usEtfSymbols = new Set(["SPY", "QQQ", "VOO", "VTI", "IVV", "SCHD", "VGT", "XLK", "SMH", "SOXX", "DIA", "IWM", "TLT", "BND", "AGG", "IBIT"]);
 let userStateLoaded = false;
@@ -467,16 +470,48 @@ function parseMarketHistoryScript(text) {
   return match ? JSON.parse(match[1]) : null;
 }
 
-async function fetchRemoteMarketData() {
-  const response = await fetch(`${REMOTE_MARKET_DATA_URL}?t=${Date.now()}`, { cache: "no-store" });
-  if (!response.ok) throw new Error(`Remote market data request failed: ${response.status}`);
-  return parseMarketDataScript(await response.text());
+function parseMarketManifestScript(text) {
+  const match = String(text || "").match(/^window\.TWSE_MARKET_MANIFEST = (.*);\s*$/s);
+  const manifest = match ? JSON.parse(match[1]) : null;
+  return manifest?.version && manifest?.summary && manifest?.history ? manifest : null;
 }
 
-async function fetchRemoteMarketHistory() {
-  const response = await fetch(`${REMOTE_MARKET_HISTORY_URL}?t=${Date.now()}`, { cache: "no-store" });
+async function fetchRemoteMarketManifest() {
+  const response = await fetch(`${REMOTE_MARKET_MANIFEST_URL}?t=${Date.now()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Remote market manifest request failed: ${response.status}`);
+  const manifest = parseMarketManifestScript(await response.text());
+  if (!manifest) throw new Error("Remote market manifest is invalid");
+  return manifest;
+}
+
+async function fetchRemoteMarketData(manifest) {
+  const response = await fetch(`${REMOTE_MARKET_DATA_URL}?v=${encodeURIComponent(manifest?.version || Date.now())}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Remote market data request failed: ${response.status}`);
+  const payload = parseMarketDataScript(await response.text());
+  if (manifest?.version && payload?.fetchedAt !== manifest.version) throw new Error("Remote market summary version does not match manifest");
+  return payload;
+}
+
+async function fetchRemoteMarketHistory(manifest) {
+  const response = await fetch(`${REMOTE_MARKET_HISTORY_URL}?v=${encodeURIComponent(manifest?.version || Date.now())}`, { cache: "no-store" });
   if (!response.ok) throw new Error(`Remote market history request failed: ${response.status}`);
-  return parseMarketHistoryScript(await response.text());
+  const payload = parseMarketHistoryScript(await response.text());
+  if (manifest?.version && payload?.fetchedAt !== manifest.version) throw new Error("Remote market history version does not match manifest");
+  return payload;
+}
+
+async function fetchVerifiedRemoteMarketData() {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const manifest = await fetchRemoteMarketManifest();
+      const payload = await fetchRemoteMarketData(manifest);
+      return { manifest, payload };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Remote market data is unavailable");
 }
 
 function loadLocalMarketHistoryScript() {
@@ -1078,6 +1113,12 @@ function applyUsMarketData(payload) {
 }
 
 function applyMarketPayload(payload) {
+  if (payload?.fetchedAt && payload.fetchedAt !== marketDataVersion) {
+    marketHistoryReady = false;
+    marketDcaSeries = {};
+    marketDcaSnapshots = {};
+  }
+  marketDataVersion = payload?.fetchedAt || marketDataVersion;
   const added = applyTwseMarketData(payload);
   const tpexAdded = applyTpexMarketData(payload);
   const usAdded = applyUsMarketData(payload);
@@ -1091,6 +1132,7 @@ function applyMarketPayload(payload) {
 
 function applyMarketHistory(payload) {
   const history = payload?.history || payload;
+  if (marketDataVersion && payload?.fetchedAt && payload.fetchedAt !== marketDataVersion) return false;
   if (!history || !Object.keys(history.dcaSeries || {}).length) return false;
   marketHistoryPeriods = { ...marketHistoryPeriods, ...(history.periods || {}) };
   marketDcaSnapshots = { ...marketDcaSnapshots, ...(history.dcaMonthly || {}) };
@@ -1127,7 +1169,8 @@ async function loadMarketHistory() {
       console.warn(`Local market history unavailable: ${error.message}`);
     }
     try {
-      const remote = await fetchRemoteMarketHistory();
+      const manifest = marketManifest || await fetchRemoteMarketManifest();
+      const remote = await fetchRemoteMarketHistory(manifest);
       return applyMarketHistory(remote);
     } catch (error) {
       console.warn(`Remote market history unavailable: ${error.message}`);
@@ -1161,7 +1204,9 @@ async function loadDailyMarketData() {
   }
   try {
     setMarketStatus("正在確認 GitHub 的最新收盤資料...");
-    const remote = await fetchRemoteMarketData();
+    const remoteResult = await fetchVerifiedRemoteMarketData();
+    marketManifest = remoteResult.manifest;
+    const remote = remoteResult.payload;
     if (remote?.fetchedAt && (!initial?.fetchedAt || isNewerMarketPayload(remote, initial))) {
       const { added, tpexAdded, usAdded } = applyMarketPayload(remote);
       writeCache({ ...remote, cachedAt: today });
