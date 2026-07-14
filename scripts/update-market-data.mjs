@@ -6,6 +6,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outFile = resolve(root, "data", "market-data.js");
 const historyOutFile = resolve(root, "data", "market-history.js");
 const manifestOutFile = resolve(root, "data", "market-manifest.js");
+const US_QUOTE_CONCURRENCY = 4;
 
 const endpoints = {
   daily: "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data",
@@ -137,6 +138,20 @@ async function getJson(url, options = {}) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function getText(url, options = {}) {
@@ -678,18 +693,21 @@ function assertUsRows(rows) {
 
 async function getUsRows(existingPayload) {
   const existingBySymbol = Object.fromEntries((existingPayload?.usDaily || []).map((row) => [row.symbol, row]));
-  const rows = [];
-  for (const symbol of Object.keys(usSymbols)) {
+  const rows = await mapWithConcurrency(Object.keys(usSymbols), US_QUOTE_CONCURRENCY, async (symbol) => {
     const row = await getUsQuote(symbol);
     if (row) {
-      rows.push(row);
-    } else if (existingBySymbol[symbol]) {
-      rows.push(existingBySymbol[symbol]);
-      console.warn(`Using existing US quote for ${symbol}.`);
+      await sleep(80);
+      return row;
     }
-    await sleep(160);
-  }
-  return rows;
+    if (existingBySymbol[symbol]) {
+      console.warn(`Using existing US quote for ${symbol}.`);
+      await sleep(80);
+      return existingBySymbol[symbol];
+    }
+    await sleep(80);
+    return null;
+  });
+  return rows.filter(Boolean);
 }
 
 const existingPayload = await readExistingPayload();
