@@ -209,6 +209,18 @@ button:focus {
   outline-offset: 2px;
 }
 
+select,
+input,
+a {
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease, transform 140ms ease;
+}
+
+select.interaction-updated,
+input.interaction-updated {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.13);
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -217,6 +229,7 @@ button:focus {
 }
 
 .market-status {
+  position: relative;
   margin: -0.35rem 0 1rem;
   padding: 0.7rem 0.85rem;
   border: 1px solid var(--border);
@@ -224,6 +237,24 @@ button:focus {
   background: #fbfcfb;
   color: var(--muted);
   font-size: 0.9rem;
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.market-status.is-busy {
+  border-color: #77bcb0;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
+}
+
+.market-status.is-busy::before {
+  content: "";
+  display: inline-block;
+  width: 0.65rem;
+  height: 0.65rem;
+  margin-right: 0.5rem;
+  border: 2px solid #89bcb4;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: control-spin 760ms linear infinite;
 }
 
 .market-status[data-kind="ok"] {
@@ -272,8 +303,20 @@ button:focus {
 }
 
 .panel {
+  position: relative;
   padding: 1.15rem;
   box-shadow: var(--shadow);
+  transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.panel:focus-within {
+  border-color: #9bcabf;
+  box-shadow: 0 16px 40px rgba(15, 118, 110, 0.11);
+}
+
+.panel.is-calculating {
+  border-color: #77bcb0;
+  box-shadow: 0 16px 40px rgba(15, 118, 110, 0.12);
 }
 
 .chart-panel {
@@ -439,6 +482,7 @@ canvas {
 }
 
 button {
+  position: relative;
   min-height: 2.65rem;
   border: 0;
   border-radius: 8px;
@@ -447,15 +491,39 @@ button {
   padding: 0 1rem;
   font-weight: 800;
   cursor: pointer;
+  transition: transform 140ms ease, box-shadow 180ms ease, background 180ms ease, opacity 180ms ease;
 }
 
 button:hover {
   background: var(--accent-dark);
+  box-shadow: 0 8px 18px rgba(11, 79, 74, 0.2);
+  transform: translateY(-1px);
+}
+
+button:active,
+button.interaction-press {
+  transform: translateY(1px) scale(0.98);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.18);
 }
 
 button:disabled {
   cursor: not-allowed;
   background: #9aa8a0;
+  box-shadow: none;
+  transform: none;
+}
+
+button.is-busy::before {
+  content: "";
+  display: inline-block;
+  width: 0.82rem;
+  height: 0.82rem;
+  margin-right: 0.5rem;
+  border: 2px solid rgba(255, 255, 255, 0.42);
+  border-top-color: #fff;
+  border-radius: 50%;
+  vertical-align: -0.1rem;
+  animation: control-spin 720ms linear infinite;
 }
 
 .table-wrap {
@@ -977,6 +1045,59 @@ code {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.86rem;
   line-height: 1.55;
+}
+
+.interaction-toast {
+  position: fixed;
+  right: max(1.25rem, env(safe-area-inset-right));
+  bottom: max(1.25rem, env(safe-area-inset-bottom));
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  max-width: min(26rem, calc(100vw - 2rem));
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #bfe6d6;
+  border-radius: 8px;
+  background: #18201b;
+  box-shadow: 0 16px 38px rgba(24, 32, 27, 0.22);
+  color: #f7faf7;
+  font-size: 0.88rem;
+  font-weight: 750;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(0.75rem);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.interaction-toast.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.interaction-toast[data-kind="warn"] {
+  border-color: #efc98e;
+  background: #5a390c;
+}
+
+.interaction-toast-dot {
+  width: 0.58rem;
+  height: 0.58rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #70d1bd;
+  box-shadow: 0 0 0 4px rgba(112, 209, 189, 0.16);
+}
+
+.interaction-toast[data-kind="warn"] .interaction-toast-dot {
+  background: #ffd086;
+  box-shadow: 0 0 0 4px rgba(255, 208, 134, 0.14);
+}
+
+@keyframes control-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 980px) {

@@ -49,7 +49,7 @@
             <button id="refreshDataButton" class="refresh-data" type="button">更新資料</button>
           </div>
         </section>
-        <div id="marketStatus" class="market-status">正在準備市場資料...</div>
+        <div id="marketStatus" class="market-status" role="status" aria-live="polite">正在準備市場資料...</div>
 
         <section class="panel watchlist-panel">
           <div class="panel-heading">
@@ -580,8 +580,12 @@
         </section>
       </main>
     </div>
+    <div id="interactionToast" class="interaction-toast" role="status" aria-live="polite" aria-atomic="true">
+      <span class="interaction-toast-dot" aria-hidden="true"></span>
+      <span id="interactionToastText">準備就緒</span>
+    </div>
 
     <script src="data/market-data.js?v=20260714-manifest"></script>
-    <script src="app.js?v=20260714-manifest"></script>
+    <script src="app.js?v=20260715-interaction-feedback"></script>
   </body>
 </html>

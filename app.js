@@ -169,6 +169,7 @@ let dcaRenderToken = 0;
 let scenarioRenderToken = 0;
 let stockTrendRenderToken = 0;
 let stockTrendChartState = { points: [], hoverIndex: null };
+let interactionToastTimer = null;
 
 const sectorNames = {
   "01": "水泥",
@@ -293,6 +294,74 @@ function setMarketStatus(message, kind = "info") {
   if (!status) return;
   status.textContent = message;
   status.dataset.kind = kind;
+  status.classList.toggle("is-busy", /正在|載入|取得|補齊/.test(message));
+  if (kind !== "info") notifyInteraction(message, kind);
+}
+
+function notifyInteraction(message, kind = "info") {
+  const toast = $("#interactionToast");
+  const text = $("#interactionToastText");
+  if (!toast || !text) return;
+  text.textContent = message;
+  toast.dataset.kind = kind;
+  toast.classList.add("is-visible");
+  clearTimeout(interactionToastTimer);
+  interactionToastTimer = setTimeout(() => toast.classList.remove("is-visible"), kind === "warn" ? 5200 : 2800);
+}
+
+function setButtonBusy(button, busy, busyLabel = "處理中") {
+  if (!button) return;
+  if (busy) {
+    button.dataset.originalLabel = button.textContent;
+    button.textContent = busyLabel;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.classList.add("is-busy");
+    return;
+  }
+  if (button.dataset.originalLabel) button.textContent = button.dataset.originalLabel;
+  button.disabled = false;
+  button.removeAttribute("aria-busy");
+  button.classList.remove("is-busy");
+}
+
+function setPanelBusy(selector, busy) {
+  const panel = $(selector);
+  if (!panel) return;
+  panel.classList.toggle("is-calculating", busy);
+  panel.setAttribute("aria-busy", String(busy));
+}
+
+function controlLabel(control) {
+  const label = control.closest("label");
+  const text = label?.childNodes?.[0]?.textContent?.trim();
+  return text || control.getAttribute("aria-label") || control.name || "設定";
+}
+
+function bindInteractionFeedback() {
+  document.addEventListener("pointerdown", (event) => {
+    const control = event.target.closest("button, a, select, input");
+    if (!control || control.disabled) return;
+    control.classList.remove("interaction-press");
+    void control.offsetWidth;
+    control.classList.add("interaction-press");
+    window.setTimeout(() => control.classList.remove("interaction-press"), 260);
+  });
+
+  document.addEventListener("change", (event) => {
+    const control = event.target;
+    if (!control.matches("select, input")) return;
+    control.classList.add("interaction-updated");
+    window.setTimeout(() => control.classList.remove("interaction-updated"), 900);
+    notifyInteraction(`${controlLabel(control)} 已更新`, "ok");
+  });
+
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button || button.disabled || button.classList.contains("is-busy")) return;
+    const label = button.textContent.trim().replace(/\s+/g, " ");
+    if (label) notifyInteraction(`${label}：正在處理`, "info");
+  });
 }
 
 function uniqueSymbols(symbols) {
@@ -2808,12 +2877,14 @@ function renderPortfolioEngine() {
 
 async function renderCompareEngine() {
   const token = ++compareRenderToken;
+  setPanelBusy("#compare", true);
   const customFields = $("#compareCustomFields");
   customFields.hidden = state.comparePeriod !== "custom";
   if (state.comparePeriod === "custom" && state.compareStartDate > state.compareEndDate) {
     $("#compareBasis").textContent = "日期區間錯誤：開始日期必須早於結束日期。";
     drawBarChart($("#compareBarChart"), []);
     $("#compareBreakdown").innerHTML = "";
+    setPanelBusy("#compare", false);
     return;
   }
 
@@ -2827,6 +2898,7 @@ async function renderCompareEngine() {
 
   if (!startSnapshot || !endSnapshot) {
     $("#compareBasis").textContent = `無法取得 ${startTarget} 到 ${endTarget} 的官方收盤價，先不產生比較結果，避免顯示錯誤資料。`;
+    setPanelBusy("#compare", false);
     return;
   }
 
@@ -2869,6 +2941,7 @@ async function renderCompareEngine() {
       )
       .join("")
     : `<div><strong>尚未選擇股票</strong><span>先加入要比較的標的。</span><b>--</b></div>`;
+  setPanelBusy("#compare", false);
 }
 
 async function renderDcaEngine() {
@@ -3261,6 +3334,7 @@ function renderHotStocks() {
 
 async function renderStockTrend() {
   const token = ++stockTrendRenderToken;
+  setPanelBusy("#stock-trend", true);
   const symbol = stocks[state.stockTrendSymbol] ? state.stockTrendSymbol : visibleSymbols()[0] || "2330";
   state.stockTrendSymbol = symbol;
   const stock = stocks[symbol];
@@ -3287,6 +3361,7 @@ async function renderStockTrend() {
     $("#stockTrendTradeValue").textContent = formatMarketCap(stock.tradeValue || 0);
     $("#stockTrendNote").textContent = "已顯示當日收盤價，完整日線正在背景載入。";
     drawPriceChart($("#stockTrendChart"), []);
+    setPanelBusy("#stock-trend", false);
     return;
   }
   drawPriceChart($("#stockTrendChart"), []);
@@ -3318,6 +3393,7 @@ async function renderStockTrend() {
       : `${symbol} ${stock.name} 在 ${stockTrendPeriodLabel()} 區間沒有足夠日線；請改選較短期間或稍後重試。`;
   stockTrendChartState = { points, hoverIndex: null, symbol, baseValue: first?.value || 0 };
   drawPriceChart($("#stockTrendChart"), points, stockTrendChartState);
+  setPanelBusy("#stock-trend", false);
 }
 
 function renderRiskPosition() {
@@ -3410,9 +3486,16 @@ function render() {
 }
 
 function bindEvents() {
-  $("#refreshDataButton")?.addEventListener("click", () => {
+  bindInteractionFeedback();
+  $("#refreshDataButton")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    setButtonBusy(button, true, "更新中");
     setMarketStatus("正在重新確認當日收盤資料...");
-    void loadDailyMarketData();
+    try {
+      await loadDailyMarketData();
+    } finally {
+      setButtonBusy(button, false);
+    }
   });
   $("#benchmarkSelect").addEventListener("change", (event) => {
     state.benchmark = event.target.value;
@@ -3451,6 +3534,7 @@ function bindEvents() {
     saveUserState();
     renderControls();
     render();
+    notifyInteraction(`${symbol} ${stocks[symbol].name} 已加入自選清單`, "ok");
     void (async () => {
       setMarketStatus(`正在補齊 ${symbol} ${stocks[symbol]?.name || ""} 的完整歷史日線...`);
       const ready = await ensureFullHistoryFor(symbol);
@@ -3474,6 +3558,7 @@ function bindEvents() {
     saveUserState();
     renderControls();
     render();
+    notifyInteraction(`${symbol} 已從自選清單移除`, "ok");
   });
 
   $("#portfolioAddForm").addEventListener("submit", (event) => {
@@ -3486,6 +3571,7 @@ function bindEvents() {
     saveUserState();
     renderControls();
     renderPortfolioEngine();
+    notifyInteraction(`${symbol} 已加入投資組合`, "ok");
   });
 
   $("#compareAddForm").addEventListener("submit", (event) => {
@@ -3496,6 +3582,7 @@ function bindEvents() {
     saveUserState();
     renderControls();
     renderCompareEngine();
+    notifyInteraction(`${symbol} 已加入比較`, "ok");
   });
 
   $("#compareChips").addEventListener("click", (event) => {
@@ -3505,6 +3592,7 @@ function bindEvents() {
     saveUserState();
     renderControls();
     renderCompareEngine();
+    notifyInteraction(`${button.dataset.removeCompare} 已從比較移除`, "ok");
   });
 
   $("#portfolioAmount").addEventListener("input", () => {
@@ -3556,6 +3644,7 @@ function bindEvents() {
     saveUserState();
     renderControls();
     renderDcaEngine();
+    notifyInteraction(`${symbol} 已加入定期定額`, "ok");
   });
   $("#dcaChips").addEventListener("click", (event) => {
     const button = event.target.closest("[data-remove-dca]");
@@ -3564,6 +3653,7 @@ function bindEvents() {
     saveUserState();
     renderControls();
     renderDcaEngine();
+    notifyInteraction(`${button.dataset.removeDca} 已從定期定額移除`, "ok");
   });
 
   $("#conditionalMode").addEventListener("change", (event) => {
@@ -3599,6 +3689,7 @@ function bindEvents() {
     saveUserState();
     renderControls();
     renderConditionalEngine();
+    notifyInteraction(`${symbol} 已加入條件買入`, "ok");
   });
   $("#conditionalChips").addEventListener("click", (event) => {
     const button = event.target.closest("[data-remove-conditional]");
@@ -3607,6 +3698,7 @@ function bindEvents() {
     saveUserState();
     renderControls();
     renderConditionalEngine();
+    notifyInteraction(`${button.dataset.removeConditional} 已從條件買入移除`, "ok");
   });
 
   $("#rankingPeriod").addEventListener("change", (event) => {
@@ -3665,6 +3757,7 @@ function bindEvents() {
     if (!button) return;
     state.stockTrendPeriod = button.dataset.stockPeriod;
     saveUserState();
+    notifyInteraction(`已切換至 ${stockTrendPeriodLabel()} 走勢`, "ok");
     renderStockTrend();
   });
   $("#stockTrendChart").addEventListener("mousemove", (event) => {
@@ -3691,6 +3784,7 @@ function bindEvents() {
     if (!stocks[symbol]) return;
     state.stockTrendSymbol = symbol;
     saveUserState();
+    notifyInteraction(`正在開啟 ${symbol} ${stocks[symbol].name} 走勢`, "info");
     renderStockTrend();
     document.querySelector("#stock-trend")?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
