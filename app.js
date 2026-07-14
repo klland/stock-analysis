@@ -1212,6 +1212,8 @@ function applyMarketHistory(payload) {
   renderConditionalEngine();
   renderStockTrend();
   renderHotStocks();
+  renderAdvancedMetrics();
+  renderCharts();
   return true;
 }
 
@@ -3466,6 +3468,12 @@ function renderCharts() {
   ]
     .map((item) => `<span><i style="background:${item.color}"></i>${item.label}</span>`)
     .join("");
+  const chartStatus = $("#equityChartStatus");
+  if (chartStatus) {
+    chartStatus.textContent = marketHistoryReady
+      ? `以每日收盤估值，共 ${real.series.length.toLocaleString("zh-TW")} 個交易日。`
+      : "歷史日線載入中，圖表暫以本地快照顯示。";
+  }
 }
 
 function render() {

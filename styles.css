@@ -332,6 +332,13 @@ canvas {
   background: #fbfcfb;
 }
 
+.chart-status {
+  margin: 0.65rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 .legend {
   display: flex;
   flex-wrap: wrap;
