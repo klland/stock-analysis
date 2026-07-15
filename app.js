@@ -587,7 +587,7 @@ function loadLocalMarketHistoryScript() {
   if (window.TWSE_MARKET_HISTORY) return Promise.resolve(window.TWSE_MARKET_HISTORY);
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.src = LOCAL_MARKET_HISTORY_URL;
+    script.src = `${LOCAL_MARKET_HISTORY_URL}?v=${encodeURIComponent(marketDataVersion || Date.now())}`;
     script.async = true;
     script.onload = () => resolve(window.TWSE_MARKET_HISTORY || null);
     script.onerror = () => reject(new Error("Local market history script unavailable"));
