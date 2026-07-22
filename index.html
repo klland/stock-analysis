@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Decision Ledger | 投資決策分析</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260722-ui-feedback" />
   </head>
   <body>
     <div class="app-shell">
@@ -14,17 +14,19 @@
           <h1>投資決策分析</h1>
         </div>
         <nav>
-          <a href="#dashboard" class="active">首頁 Dashboard</a>
+          <a href="#dashboard" class="active">投資總覽</a>
+          <a href="#transactions">交易紀錄</a>
           <a href="#portfolio">我的投資組合</a>
-          <a href="#compare">股票比較引擎</a>
-          <a href="#dca">定期定額模擬</a>
-          <a href="#conditional">條件買入模擬</a>
-          <a href="#ranking">台股排行榜</a>
+          <a href="#compare">股票比較</a>
+          <a href="#dca">定期定額</a>
+          <a href="#conditional">條件買入</a>
+          <a href="#ranking">台股排行</a>
           <a href="#hot-stocks">熱門股雷達</a>
           <a href="#stock-trend">單股走勢</a>
           <a href="#risk-position">高低位分析</a>
           <a href="#advanced">進階分析</a>
-          <a href="#architecture">資料與 API</a>
+          <a href="#what-if">單筆交易檢視</a>
+          <a href="#architecture">資料說明</a>
         </nav>
         <div class="data-note">
           <strong>市場資料狀態</strong>
@@ -55,10 +57,10 @@
           <div class="panel-heading">
             <div>
               <p class="eyebrow">My Stock List</p>
-              <h3>我的公司股票清單</h3>
+              <h3>我的自選清單</h3>
             </div>
             <form id="watchlistForm" class="inline-form">
-              <input id="stockSearchInput" list="stockSearchList" placeholder="輸入代號或名稱，例如 2330 台積電" />
+              <input id="stockSearchInput" list="stockSearchList" aria-label="股票代號或名稱" placeholder="輸入代號或名稱，例如 2330 台積電" />
               <datalist id="stockSearchList"></datalist>
               <button type="submit">新增股票</button>
             </form>
@@ -167,7 +169,7 @@
             </div>
           </div>
           <form id="portfolioAddForm" class="inline-form module-add">
-            <select id="portfolioAddSelect"></select>
+            <select id="portfolioAddSelect" aria-label="選擇要加入投資組合的股票"></select>
             <button type="submit">加入組合</button>
           </form>
           <div id="portfolioBasis" class="section-note"></div>
@@ -203,7 +205,7 @@
             </label>
           </div>
           <form id="compareAddForm" class="inline-form module-add">
-            <select id="compareAddSelect"></select>
+            <select id="compareAddSelect" aria-label="選擇要加入比較的股票"></select>
             <button type="submit">加入比較</button>
           </form>
           <div id="compareBasis" class="section-note"></div>
@@ -241,7 +243,7 @@
             </div>
           </div>
           <form id="dcaAddForm" class="inline-form module-add">
-            <select id="dcaAddSelect"></select>
+            <select id="dcaAddSelect" aria-label="選擇定期定額標的"></select>
             <button type="submit">加入標的</button>
           </form>
           <div id="dcaChips" class="selected-list"></div>
@@ -302,7 +304,7 @@
             </div>
           </div>
           <form id="conditionalAddForm" class="inline-form module-add">
-            <select id="conditionalAddSelect"></select>
+            <select id="conditionalAddSelect" aria-label="選擇條件買入標的"></select>
             <button type="submit">加入策略</button>
           </form>
           <div id="conditionalChips" class="selected-list"></div>
@@ -503,7 +505,7 @@
               <p class="eyebrow">Position Risk</p>
               <h3>高低位分析</h3>
             </div>
-            <select id="riskSymbol"></select>
+            <select id="riskSymbol" aria-label="選擇高低位分析股票"></select>
           </div>
           <div id="riskCards" class="analysis-grid"></div>
         </section>
@@ -524,58 +526,30 @@
               <p class="eyebrow">Decision Review</p>
               <h3>單筆交易分析</h3>
             </div>
-            <select id="tradeSelect"></select>
+            <select id="tradeSelect" aria-label="選擇要分析的交易"></select>
           </div>
           <div id="singleTradeAnalysis" class="analysis-grid"></div>
         </section>
 
         <section id="architecture" class="panel method">
-          <p class="eyebrow">Engineering Core</p>
-          <h3>資料架構與 API 設計</h3>
-          <div class="schema-grid">
-            <pre><code>stocks
-- id
-- symbol
-- name
-- market</code></pre>
-            <pre><code>price_history
-- stock_id
-- date
-- close_price</code></pre>
-            <pre><code>portfolios
-- id
-- name</code></pre>
-            <pre><code>portfolio_items
-- portfolio_id
-- stock_id
-- weight</code></pre>
-          </div>
+          <p class="eyebrow">Data Notes</p>
+          <h3>資料來源與計算方式</h3>
           <div class="method-grid">
             <div>
-              <strong>GET /returns</strong>
-              <span>/returns?stocks=2330,2317&period=1y</span>
+              <strong>每日收盤行情</strong>
+              <span>台股使用 TWSE、TPEx 公開資料；美股使用公開市場日線，非盤中即時報價。</span>
             </div>
             <div>
-              <strong>GET /top</strong>
-              <span>/top?period=1m&limit=50</span>
+              <strong>歷史日線</strong>
+              <span>優先載入本機完整日線並立即繪圖，再於背景比對雲端版本與補齊最新交易日。</span>
             </div>
             <div>
-              <strong>POST /portfolio/calculate</strong>
-              <span>用 FastAPI + Pandas 計算組合報酬、MDD、波動、勝率、IRR。</span>
-            </div>
-          </div>
-          <div class="method-grid">
-            <div>
-              <strong>回測引擎</strong>
-              <span>任意時間、任意股票、任意組合，輸出報酬、MDD、波動、勝率。</span>
+              <strong>報酬與風險</strong>
+              <span>依每日收盤價計算總報酬、年化報酬、最大跌幅、波動與 Sharpe Ratio。</span>
             </div>
             <div>
-              <strong>定期定額引擎</strong>
-              <span>時間序列投入、累積股數、現金流處理；正式版加入 IRR / XIRR。</span>
-            </div>
-            <div>
-              <strong>風險引擎</strong>
-              <span>官方快照高低位、歷史基準排行、Sharpe 與相關性；完整 200 日均線需每日 price_history。</span>
+              <strong>更新時點</strong>
+              <span>交易日收盤後自動更新；頁首資料日與日線狀態會顯示目前真正使用的日期。</span>
             </div>
           </div>
         </section>
@@ -587,6 +561,6 @@
     </div>
 
     <script src="data/market-data.js?v=20260722-history-loader"></script>
-    <script src="app.js?v=20260722-history-loader"></script>
+    <script src="app.js?v=20260722-ui-feedback"></script>
   </body>
 </html>

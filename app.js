@@ -309,7 +309,7 @@ function notifyInteraction(message, kind = "info") {
   toast.dataset.kind = kind;
   toast.classList.add("is-visible");
   clearTimeout(interactionToastTimer);
-  interactionToastTimer = setTimeout(() => toast.classList.remove("is-visible"), kind === "warn" ? 5200 : 2800);
+  interactionToastTimer = setTimeout(() => toast.classList.remove("is-visible"), kind === "warn" ? 5200 : 3600);
 }
 
 function setButtonBusy(button, busy, busyLabel = "處理中") {
@@ -326,6 +326,38 @@ function setButtonBusy(button, busy, busyLabel = "處理中") {
   button.disabled = false;
   button.removeAttribute("aria-busy");
   button.classList.remove("is-busy");
+}
+
+function showButtonResult(button, label = "已完成", kind = "ok") {
+  if (!button?.isConnected) return;
+  const originalLabel = button.dataset.originalLabel || button.textContent;
+  const restoreDisabled = button.disabled;
+  button.textContent = `${kind === "ok" ? "✓ " : ""}${label}`;
+  button.classList.remove("is-busy", "is-confirmed", "is-rejected");
+  button.classList.add(kind === "ok" ? "is-confirmed" : "is-rejected");
+  button.disabled = true;
+  window.setTimeout(() => {
+    if (!button.isConnected) return;
+    button.textContent = originalLabel;
+    button.classList.remove("is-confirmed", "is-rejected");
+    button.disabled = restoreDisabled;
+    delete button.dataset.originalLabel;
+  }, kind === "ok" ? 1100 : 1500);
+}
+
+function showControlError(control, message) {
+  if (control) {
+    control.classList.remove("interaction-invalid");
+    void control.offsetWidth;
+    control.classList.add("interaction-invalid");
+    control.setAttribute("aria-invalid", "true");
+    window.setTimeout(() => {
+      control.classList.remove("interaction-invalid");
+      control.removeAttribute("aria-invalid");
+    }, 1800);
+    control.focus();
+  }
+  notifyInteraction(message, "warn");
 }
 
 function setPanelBusy(selector, busy) {
@@ -348,7 +380,12 @@ function bindInteractionFeedback() {
     control.classList.remove("interaction-press");
     void control.offsetWidth;
     control.classList.add("interaction-press");
-    window.setTimeout(() => control.classList.remove("interaction-press"), 260);
+  });
+
+  ["pointerup", "pointercancel", "pointerleave"].forEach((eventName) => {
+    document.addEventListener(eventName, (event) => {
+      event.target.closest("button, a, select, input")?.classList.remove("interaction-press");
+    });
   });
 
   document.addEventListener("change", (event) => {
@@ -362,9 +399,38 @@ function bindInteractionFeedback() {
   document.addEventListener("click", (event) => {
     const button = event.target.closest("button");
     if (!button || button.disabled || button.classList.contains("is-busy")) return;
-    const label = button.textContent.trim().replace(/\s+/g, " ");
-    if (label) notifyInteraction(`${label}：正在處理`, "info");
+    button.classList.remove("interaction-clicked");
+    void button.offsetWidth;
+    button.classList.add("interaction-clicked");
+    window.setTimeout(() => button.classList.remove("interaction-clicked"), 480);
   });
+}
+
+function bindNavigationState() {
+  const links = [...document.querySelectorAll(".sidebar nav a[href^='#']")];
+  const targets = links
+    .map((link) => ({ link, section: document.querySelector(link.getAttribute("href")) }))
+    .filter((item) => item.section);
+  const activate = (activeLink) => {
+    links.forEach((link) => {
+      const active = link === activeLink;
+      link.classList.toggle("active", active);
+      if (active) link.setAttribute("aria-current", "location");
+      else link.removeAttribute("aria-current");
+    });
+  };
+  links.forEach((link) => link.addEventListener("click", () => activate(link)));
+  let scheduled = false;
+  window.addEventListener("scroll", () => {
+    if (scheduled) return;
+    scheduled = true;
+    window.requestAnimationFrame(() => {
+      const marker = window.scrollY + Math.min(220, window.innerHeight * 0.32);
+      const current = targets.filter(({ section }) => section.offsetTop <= marker).at(-1) || targets[0];
+      if (current) activate(current.link);
+      scheduled = false;
+    });
+  }, { passive: true });
 }
 
 function uniqueSymbols(symbols) {
@@ -1290,7 +1356,8 @@ async function loadDailyMarketData() {
   const bundled = normalizeMarketPayload(window.TWSE_MARKET_DATA);
   const cache = readCache();
   const initial = [bundled, cache].filter(Boolean).sort((a, b) => (isNewerMarketPayload(a, b) ? -1 : 1))[0];
-  if (initial) {
+  const initialNeedsApply = initial && (!marketDataVersion || initial.fetchedAt !== marketDataVersion || !state.marketDataDate);
+  if (initialNeedsApply) {
     const { added, tpexAdded, usAdded } = applyMarketPayload(initial);
     setMarketStatus(`已先顯示 ${state.marketDataDate} 的可用資料，正在背景確認今日更新。TWSE ${added}、TPEx ${tpexAdded}、美股 ${usAdded} 檔。`, "ok");
   }
@@ -3096,10 +3163,14 @@ async function renderDcaEngine() {
             <small>${installments.length} 期 · 累積投入 ${currency.format(last.invested)} · 總資產 ${currency.format(last.value)}</small>
           </div>
           <div class="dca-result-metrics">
-            <span class="${classForReturn(rate)}">${percent.format(rate)}</span>
-            <small>總報酬</small>
-            <span class="${classForReturn(annualized)}">${metricValue(annualized)}</span>
-            <small>年化</small>
+            <div>
+              <small>總報酬</small>
+              <span class="${classForReturn(rate)}">${percent.format(rate)}</span>
+            </div>
+            <div>
+              <small>年化</small>
+              <span class="${classForReturn(annualized)}">${metricValue(annualized)}</span>
+            </div>
           </div>
         </div>
       `;
@@ -3243,10 +3314,14 @@ function renderConditionalEngine() {
             ${row.triggers.length > visibleTriggers.length ? `<small>還有 ${row.triggers.length - visibleTriggers.length} 次未列出</small>` : ""}
           </div>
           <div class="dca-result-metrics">
-            <span class="${classForReturn(row.returnRate)}">${percent.format(row.returnRate)}</span>
-            <small>單檔報酬</small>
-            <span>${currency.format(row.last.value)}</span>
-            <small>單檔資產</small>
+            <div>
+              <small>單檔報酬</small>
+              <span class="${classForReturn(row.returnRate)}">${percent.format(row.returnRate)}</span>
+            </div>
+            <div>
+              <small>單檔資產</small>
+              <span>${currency.format(row.last.value)}</span>
+            </div>
           </div>
         </div>
       `;
@@ -3522,14 +3597,17 @@ function render() {
 
 function bindEvents() {
   bindInteractionFeedback();
+  bindNavigationState();
   $("#refreshDataButton")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     setButtonBusy(button, true, "更新中");
     setMarketStatus("正在重新確認當日收盤資料...");
     try {
+      await new Promise((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
       await loadDailyMarketData();
     } finally {
       setButtonBusy(button, false);
+      showButtonResult(button, "檢查完成");
     }
   });
   $("#benchmarkSelect").addEventListener("change", (event) => {
@@ -3562,13 +3640,23 @@ function bindEvents() {
 
   $("#watchlistForm").addEventListener("submit", (event) => {
     event.preventDefault();
-    const symbol = resolveStockInput($("#stockSearchInput").value);
-    if (!symbol) return;
+    const input = $("#stockSearchInput");
+    const submitButton = event.currentTarget.querySelector("button[type='submit']");
+    const symbol = resolveStockInput(input.value);
+    if (!symbol) {
+      showControlError(input, "找不到這個股票代號或名稱，請從建議清單選擇。");
+      return;
+    }
+    if (state.watchlist.includes(symbol)) {
+      showControlError(input, `${symbol} 已經在自選清單中。`);
+      return;
+    }
     state.watchlist = uniqueSymbols([...state.watchlist, symbol]);
-    $("#stockSearchInput").value = "";
+    input.value = "";
     saveUserState();
     renderControls();
     render();
+    showButtonResult(submitButton, "已新增");
     notifyInteraction(`${symbol} ${stocks[symbol].name} 已加入自選清單`, "ok");
     void (async () => {
       setMarketStatus(`正在補齊 ${symbol} ${stocks[symbol]?.name || ""} 的完整歷史日線...`);
@@ -3586,7 +3674,10 @@ function bindEvents() {
   $("#watchlistChips").addEventListener("click", (event) => {
     const button = event.target.closest("[data-remove-watchlist]");
     if (!button) return;
-    if (state.watchlist.length <= 1) return;
+    if (state.watchlist.length <= 1) {
+      notifyInteraction("自選清單至少要保留一檔股票。", "warn");
+      return;
+    }
     const symbol = button.dataset.removeWatchlist;
     state.watchlist = state.watchlist.filter((item) => item !== symbol);
     syncSelections();
@@ -3598,6 +3689,7 @@ function bindEvents() {
 
   $("#portfolioAddForm").addEventListener("submit", (event) => {
     event.preventDefault();
+    const submitButton = event.currentTarget.querySelector("button[type='submit']");
     const symbol = $("#portfolioAddSelect").value;
     if (!symbol) return;
     const remaining = Math.max(0, 100 - portfolioWeights().reduce((sum, item) => sum + item.percent, 0));
@@ -3606,17 +3698,20 @@ function bindEvents() {
     saveUserState();
     renderControls();
     renderPortfolioEngine();
+    showButtonResult(submitButton, "已加入");
     notifyInteraction(`${symbol} 已加入投資組合`, "ok");
   });
 
   $("#compareAddForm").addEventListener("submit", (event) => {
     event.preventDefault();
+    const submitButton = event.currentTarget.querySelector("button[type='submit']");
     const symbol = $("#compareAddSelect").value;
     if (!symbol) return;
     state.compareSymbols = uniqueSymbols([...state.compareSymbols, symbol]);
     saveUserState();
     renderControls();
     renderCompareEngine();
+    showButtonResult(submitButton, "已加入");
     notifyInteraction(`${symbol} 已加入比較`, "ok");
   });
 
@@ -3649,6 +3744,7 @@ function bindEvents() {
     saveUserState();
     renderControls();
     renderPortfolioEngine();
+    notifyInteraction(`${button.dataset.removePortfolio} 已從投資組合移除`, "ok");
   });
 
   $("#dcaFrequency").addEventListener("change", (event) => {
@@ -3673,12 +3769,14 @@ function bindEvents() {
   });
   $("#dcaAddForm").addEventListener("submit", (event) => {
     event.preventDefault();
+    const submitButton = event.currentTarget.querySelector("button[type='submit']");
     const symbol = $("#dcaAddSelect").value;
     if (!symbol) return;
     state.dcaSymbols = uniqueSymbols([...state.dcaSymbols, symbol]);
     saveUserState();
     renderControls();
     renderDcaEngine();
+    showButtonResult(submitButton, "已加入");
     notifyInteraction(`${symbol} 已加入定期定額`, "ok");
   });
   $("#dcaChips").addEventListener("click", (event) => {
@@ -3718,12 +3816,14 @@ function bindEvents() {
   });
   $("#conditionalAddForm").addEventListener("submit", (event) => {
     event.preventDefault();
+    const submitButton = event.currentTarget.querySelector("button[type='submit']");
     const symbol = $("#conditionalAddSelect").value;
     if (!symbol) return;
     state.conditionalSymbols = uniqueSymbols([...state.conditionalSymbols, symbol]);
     saveUserState();
     renderControls();
     renderConditionalEngine();
+    showButtonResult(submitButton, "已加入");
     notifyInteraction(`${symbol} 已加入條件買入`, "ok");
   });
   $("#conditionalChips").addEventListener("click", (event) => {
@@ -3831,6 +3931,7 @@ function bindEvents() {
 
   $("#tradeForm").addEventListener("submit", (event) => {
     event.preventDefault();
+    const submitButton = event.currentTarget.querySelector("button[type='submit']");
     const symbol = $("#symbolInput").value;
     const date = $("#dateInput").value;
     const shares = Number($("#amountInput").value);
@@ -3847,14 +3948,18 @@ function bindEvents() {
     $("#priceInput").value = price;
     saveUserState();
     render();
+    showButtonResult(submitButton, "已記錄");
+    notifyInteraction(`${symbol} 交易已加入投資紀錄`, "ok");
   });
 
   $("#tradeTable").addEventListener("click", (event) => {
     const button = event.target.closest("[data-delete]");
     if (!button) return;
+    const removedTrade = trades.find((trade) => trade.id === button.dataset.delete);
     trades = trades.filter((trade) => trade.id !== button.dataset.delete);
     saveUserState();
     render();
+    notifyInteraction(`${removedTrade?.symbol || "交易"} 已從投資紀錄刪除`, "ok");
   });
 }
 
