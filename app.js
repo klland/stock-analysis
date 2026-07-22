@@ -148,7 +148,7 @@ const FINMIND_DATA_URL = "https://api.finmindtrade.com/api/v4/data";
 const REMOTE_MARKET_MANIFEST_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-manifest.js";
 const REMOTE_MARKET_DATA_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-data.js";
 const REMOTE_MARKET_HISTORY_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-history.js";
-const LOCAL_MARKET_HISTORY_URL = "data/market-history.js?v=20260714-manifest";
+const LOCAL_MARKET_HISTORY_URL = "data/market-history.js";
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
 const HISTORY_CLOSE_CACHE_KEY = "decision-ledger-history-close-cache-v1";
 const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-close-cache-v2";
@@ -158,6 +158,9 @@ let marketDcaSnapshots = {};
 let marketDcaSeries = {};
 let marketHistoryReady = false;
 let marketHistoryLoadPromise = null;
+let marketHistoryLatestDate = "";
+let marketHistoryIsStale = false;
+let marketHistoryRefreshing = false;
 let marketDataVersion = "";
 let marketManifest = null;
 const USER_STATE_KEY = "decision-ledger-user-state-v1";
@@ -1199,14 +1202,18 @@ function applyMarketPayload(payload) {
   return { added, tpexAdded, usAdded };
 }
 
-function applyMarketHistory(payload) {
+function applyMarketHistory(payload, { allowStale = false, refreshing = false } = {}) {
   const history = payload?.history || payload;
-  if (marketDataVersion && payload?.fetchedAt && payload.fetchedAt !== marketDataVersion) return false;
+  const isCurrentVersion = !marketDataVersion || !payload?.fetchedAt || payload.fetchedAt === marketDataVersion;
+  if (!isCurrentVersion && !allowStale) return false;
   if (!history || !Object.keys(history.dcaSeries || {}).length) return false;
   marketHistoryPeriods = { ...marketHistoryPeriods, ...(history.periods || {}) };
   marketDcaSnapshots = { ...marketDcaSnapshots, ...(history.dcaMonthly || {}) };
   marketDcaSeries = history.dcaSeries;
   marketHistoryReady = true;
+  marketHistoryLatestDate = history.latestDate || "";
+  marketHistoryIsStale = !isCurrentVersion;
+  marketHistoryRefreshing = marketHistoryIsStale && refreshing;
   renderDataSummary();
   renderDcaEngine();
   renderConditionalEngine();
@@ -1233,19 +1240,27 @@ async function loadMarketHistory() {
   if (marketHistoryReady) return true;
   if (marketHistoryLoadPromise) return marketHistoryLoadPromise;
   marketHistoryLoadPromise = (async () => {
+    let localApplied = false;
     try {
-      const local = await loadLocalMarketHistoryScript();
-      if (applyMarketHistory(local)) return true;
-    } catch (error) {
-      console.warn(`Local market history unavailable: ${error.message}`);
-    }
-    try {
-      const manifest = marketManifest || await fetchRemoteMarketManifest();
-      const remote = await fetchRemoteMarketHistory(manifest);
-      return applyMarketHistory(remote);
-    } catch (error) {
-      console.warn(`Remote market history unavailable: ${error.message}`);
-      return false;
+      try {
+        const local = await loadLocalMarketHistoryScript();
+        const localIsCurrent = !marketDataVersion || !local?.fetchedAt || local.fetchedAt === marketDataVersion;
+        localApplied = applyMarketHistory(local, { allowStale: true, refreshing: !localIsCurrent });
+        if (localApplied && localIsCurrent) return true;
+      } catch (error) {
+        console.warn(`Local market history unavailable: ${error.message}`);
+      }
+      try {
+        const manifest = marketManifest || await fetchRemoteMarketManifest();
+        const remote = await fetchRemoteMarketHistory(manifest);
+        return applyMarketHistory(remote);
+      } catch (error) {
+        console.warn(`Remote market history unavailable: ${error.message}`);
+        marketHistoryRefreshing = false;
+        renderDataSummary();
+        renderCharts();
+        return localApplied;
+      }
     } finally {
       marketHistoryLoadPromise = null;
     }
@@ -1255,7 +1270,13 @@ async function loadMarketHistory() {
 
 function renderDataSummary() {
   const date = state.marketDataDate || "--";
-  const historyState = marketHistoryReady ? "歷史日線已就緒" : "歷史日線背景載入中";
+  const historyState = !marketHistoryReady
+    ? "歷史日線背景載入中"
+    : marketHistoryRefreshing
+      ? `歷史日線至 ${marketHistoryLatestDate || "最近交易日"}，正在補齊`
+      : marketHistoryIsStale
+        ? `歷史日線至 ${marketHistoryLatestDate || "最近交易日"}`
+        : "歷史日線已就緒";
   const freshness = $("#dataFreshness");
   const detail = $("#dataDetail");
   const sidebarNote = $("#sidebarDataNote");
@@ -2467,7 +2488,7 @@ function drawLineChart(canvas, seriesList, formatter = currency, options = {}) {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "#667068";
     ctx.font = "13px system-ui";
-    ctx.fillText("這個日期區間沒有可用資料。", 24, 44);
+    ctx.fillText(options.emptyMessage || "這個日期區間沒有可用資料。", 24, 44);
     return;
   }
   const max = Math.max(...values, 1) * 1.08;
@@ -3448,6 +3469,13 @@ function correlation(a, b) {
 }
 
 function renderCharts() {
+  const chartStatus = $("#equityChartStatus");
+  if (!marketHistoryReady) {
+    drawLineChart($("#equityChart"), [], currency, { emptyMessage: "正在載入歷史日線，完成後顯示每日資產曲線。" });
+    $("#equityLegend").innerHTML = "";
+    if (chartStatus) chartStatus.textContent = "歷史日線載入中，不使用快照直線代替。";
+    return;
+  }
   const colors = ["#a15c07", "#2563eb", "#7c3aed", "#b42318", "#475569", "#15803d", "#be185d", "#0891b2"];
   const alternatives = visibleSymbols()
     .map((symbol, index) => ({
@@ -3468,11 +3496,10 @@ function renderCharts() {
   ]
     .map((item) => `<span><i style="background:${item.color}"></i>${item.label}</span>`)
     .join("");
-  const chartStatus = $("#equityChartStatus");
   if (chartStatus) {
-    chartStatus.textContent = marketHistoryReady
-      ? `以每日收盤估值，共 ${real.series.length.toLocaleString("zh-TW")} 個交易日。`
-      : "歷史日線載入中，圖表暫以本地快照顯示。";
+    const dateNote = marketHistoryLatestDate ? `，日線至 ${marketHistoryLatestDate}` : "";
+    const refreshNote = marketHistoryRefreshing ? "，正在背景補齊最新資料" : "";
+    chartStatus.textContent = `以每日收盤估值，共 ${real.series.length.toLocaleString("zh-TW")} 個交易日${dateNote}${refreshNote}。`;
   }
 }
 
