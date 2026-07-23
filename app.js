@@ -173,6 +173,8 @@ let scenarioRenderToken = 0;
 let stockTrendRenderToken = 0;
 let stockTrendChartState = { points: [], hoverIndex: null };
 let interactionToastTimer = null;
+let stockSearchActiveIndex = -1;
+let stockSearchResults = [];
 
 const sectorNames = {
   "01": "水泥",
@@ -473,6 +475,175 @@ function resolveStockInput(value) {
       stock.name.toLowerCase().includes(lowered),
   );
   return match?.[0] || "";
+}
+
+function matchingStocks(value) {
+  const query = String(value || "").trim().toLowerCase();
+  if (!query) return [];
+  return Object.entries(stocks)
+    .filter(([symbol, stock]) => isTaiwanSymbol(symbol) || stock.market === "US")
+    .map(([symbol, stock]) => {
+      const code = symbol.toLowerCase();
+      const name = stock.name.toLowerCase();
+      let score = Number.POSITIVE_INFINITY;
+      if (code === query) score = 0;
+      else if (code.startsWith(query)) score = 1;
+      else if (name === query) score = 2;
+      else if (name.startsWith(query)) score = 3;
+      else if (name.includes(query) || `${code} ${name}`.includes(query)) score = 4;
+      return { symbol, stock, score };
+    })
+    .filter((result) => Number.isFinite(result.score))
+    .sort(
+      (a, b) =>
+        a.score - b.score ||
+        Number(state.watchlist.includes(a.symbol)) - Number(state.watchlist.includes(b.symbol)) ||
+        (b.stock.marketCap || 0) - (a.stock.marketCap || 0) ||
+        a.symbol.localeCompare(b.symbol),
+    )
+    .slice(0, 8);
+}
+
+function closeStockSearchSuggestions() {
+  const input = $("#stockSearchInput");
+  const suggestions = $("#stockSearchSuggestions");
+  if (!input || !suggestions) return;
+  suggestions.hidden = true;
+  suggestions.replaceChildren();
+  input.setAttribute("aria-expanded", "false");
+  input.removeAttribute("aria-activedescendant");
+  stockSearchActiveIndex = -1;
+  stockSearchResults = [];
+}
+
+function setStockSearchActiveIndex(index) {
+  const input = $("#stockSearchInput");
+  const options = [...document.querySelectorAll("[data-stock-suggestion]")];
+  if (!input || options.length === 0) return;
+  stockSearchActiveIndex = (index + options.length) % options.length;
+  options.forEach((option, optionIndex) => {
+    const active = optionIndex === stockSearchActiveIndex;
+    option.classList.toggle("is-active", active);
+    option.setAttribute("aria-selected", String(active));
+    if (active) {
+      input.setAttribute("aria-activedescendant", option.id);
+      option.scrollIntoView({ block: "nearest" });
+    }
+  });
+}
+
+function renderStockSearchSuggestions() {
+  const input = $("#stockSearchInput");
+  const suggestions = $("#stockSearchSuggestions");
+  const hint = $("#stockSearchHint");
+  if (!input || !suggestions) return;
+  const query = input.value.trim();
+  if (!query) {
+    closeStockSearchSuggestions();
+    if (hint) hint.textContent = "";
+    return;
+  }
+
+  stockSearchResults = matchingStocks(query);
+  stockSearchActiveIndex = -1;
+  suggestions.replaceChildren();
+  if (stockSearchResults.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "stock-search-empty";
+    empty.textContent = "找不到符合的股票";
+    suggestions.append(empty);
+  } else {
+    stockSearchResults.forEach(({ symbol, stock }, index) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.id = `stock-search-option-${index}`;
+      option.className = "stock-search-option";
+      option.dataset.stockSuggestion = symbol;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", "false");
+
+      const identity = document.createElement("span");
+      identity.className = "stock-search-identity";
+      const title = document.createElement("strong");
+      title.textContent = `${symbol} ${stock.name}`;
+      const detail = document.createElement("small");
+      detail.textContent = `${stock.market || "市場"} · ${stock.sector || "股票"}`;
+      identity.append(title, detail);
+
+      const status = document.createElement("span");
+      status.className = "stock-search-option-status";
+      status.textContent = state.watchlist.includes(symbol) ? "已加入" : "選擇";
+      option.append(identity, status);
+      suggestions.append(option);
+    });
+  }
+  suggestions.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+  if (hint) hint.textContent = stockSearchResults.length ? `找到 ${stockSearchResults.length} 筆股票` : "找不到符合的股票";
+}
+
+function selectStockSearchSuggestion(symbol) {
+  const input = $("#stockSearchInput");
+  const stock = stocks[symbol];
+  if (!input || !stock) return;
+  input.value = `${symbol} ${stock.name}`;
+  closeStockSearchSuggestions();
+  input.focus();
+  notifyInteraction(`已選擇 ${symbol} ${stock.name}`, "ok");
+}
+
+function bindStockSearch() {
+  const form = $("#watchlistForm");
+  const input = $("#stockSearchInput");
+  const suggestions = $("#stockSearchSuggestions");
+  if (!form || !input || !suggestions) return;
+
+  input.addEventListener("input", renderStockSearchSuggestions);
+  input.addEventListener("focus", () => {
+    if (input.value.trim()) renderStockSearchSuggestions();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeStockSearchSuggestions();
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "ArrowDown" && stockSearchResults.length) {
+      setStockSearchActiveIndex(stockSearchActiveIndex + 1);
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "ArrowUp" && stockSearchResults.length) {
+      setStockSearchActiveIndex(stockSearchActiveIndex < 0 ? stockSearchResults.length - 1 : stockSearchActiveIndex - 1);
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "Enter" && stockSearchActiveIndex >= 0) {
+      selectStockSearchSuggestion(stockSearchResults[stockSearchActiveIndex].symbol);
+      event.preventDefault();
+    }
+  });
+
+  suggestions.addEventListener("pointerdown", (event) => event.preventDefault());
+  suggestions.addEventListener("pointermove", (event) => {
+    const option = event.target.closest("[data-stock-suggestion]");
+    if (!option) return;
+    const index = [...suggestions.querySelectorAll("[data-stock-suggestion]")].indexOf(option);
+    if (index >= 0 && index !== stockSearchActiveIndex) setStockSearchActiveIndex(index);
+  });
+  suggestions.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-stock-suggestion]");
+    if (option) selectStockSearchSuggestion(option.dataset.stockSuggestion);
+  });
+
+  form.addEventListener("focusout", () => {
+    window.setTimeout(() => {
+      if (!form.contains(document.activeElement)) closeStockSearchSuggestions();
+    }, 0);
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!form.contains(event.target)) closeStockSearchSuggestions();
+  });
 }
 
 function loadUserState() {
@@ -2725,10 +2896,6 @@ function renderControls() {
   const sortedEntries = Object.entries(stocks).sort((a, b) => (b[1].marketCap || 0) - (a[1].marketCap || 0));
   const list = visibleSymbols();
   const options = optionHtml(list);
-  $("#stockSearchList").innerHTML = sortedEntries
-    .filter(([symbol, stock]) => isTaiwanSymbol(symbol) || stock.market === "US")
-    .map(([symbol, stock]) => `<option value="${symbol} ${stock.name}"></option>`)
-    .join("");
   $("#benchmarkSelect").innerHTML = options;
   $("#symbolInput").innerHTML = options;
   $("#riskSymbol").innerHTML = options;
@@ -3598,6 +3765,7 @@ function render() {
 function bindEvents() {
   bindInteractionFeedback();
   bindNavigationState();
+  bindStockSearch();
   $("#refreshDataButton")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     setButtonBusy(button, true, "更新中");
@@ -3643,6 +3811,7 @@ function bindEvents() {
     const input = $("#stockSearchInput");
     const submitButton = event.currentTarget.querySelector("button[type='submit']");
     const symbol = resolveStockInput(input.value);
+    closeStockSearchSuggestions();
     if (!symbol) {
       showControlError(input, "找不到這個股票代號或名稱，請從建議清單選擇。");
       return;

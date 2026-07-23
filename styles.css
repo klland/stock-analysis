@@ -825,6 +825,105 @@ td:last-child {
   min-width: 17rem;
 }
 
+.stock-search {
+  position: relative;
+  flex: 1 1 24rem;
+  min-width: 17rem;
+}
+
+.stock-search input {
+  min-width: 100%;
+}
+
+.stock-search-suggestions {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  left: 0;
+  max-height: min(24rem, 52vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.35rem;
+  border: 1px solid #bdc9c1;
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 18px 38px rgba(24, 32, 27, 0.18);
+}
+
+.stock-search-suggestions[hidden] {
+  display: none;
+}
+
+.stock-search-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  min-height: 3.3rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid transparent;
+  background: #fff;
+  color: var(--text);
+  text-align: left;
+}
+
+.stock-search-option:hover,
+.stock-search-option.is-active {
+  border-color: #a9cfc7;
+  background: #edf7f4;
+  color: var(--text);
+  box-shadow: none;
+  transform: none;
+}
+
+.stock-search-option + .stock-search-option {
+  margin-top: 0.2rem;
+}
+
+.stock-search-identity {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.stock-search-identity strong,
+.stock-search-identity small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stock-search-identity small {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.stock-search-option-status {
+  color: var(--accent);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.stock-search-empty {
+  padding: 0.85rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  text-align: center;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .module-add {
   margin-top: 1rem;
 }
@@ -1373,6 +1472,12 @@ code {
     width: 100%;
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .stock-search {
+    flex: 0 0 auto;
+    width: 100%;
+    min-width: 0;
   }
 
   .interaction-toast {
