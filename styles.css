@@ -20,7 +20,7 @@
 }
 
 html {
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
 
 body {
@@ -311,6 +311,11 @@ input.interaction-invalid {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+
+main > .panel:not(.watchlist-panel) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 680px;
 }
 
 .metric {

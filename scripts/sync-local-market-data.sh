@@ -12,5 +12,6 @@ node --check app.js
 node --check data/market-manifest.js
 node --check data/market-data.js
 node --check data/market-history.js
+node --check data/history/2330.js
 
 echo "Remote market data synced. GitHub Actions is the only market-data writer."

@@ -1,10 +1,11 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outFile = resolve(root, "data", "market-data.js");
 const historyOutFile = resolve(root, "data", "market-history.js");
+const historyChunkDir = resolve(root, "data", "history");
 const manifestOutFile = resolve(root, "data", "market-manifest.js");
 const US_QUOTE_CONCURRENCY = 4;
 
@@ -722,12 +723,18 @@ const [daily, companies, tpexCsv, usDaily] = await Promise.all([
 assertUsRows(usDaily);
 
 const tpexDaily = parseCsv(tpexCsv);
+const compactCompanies = companies.map((company) => ({
+  "公司代號": company["公司代號"],
+  "公司簡稱": company["公司簡稱"],
+  "產業別": company["產業別"],
+  "已發行普通股數或TDR原股發行股數": company["已發行普通股數或TDR原股發行股數"],
+}));
 const latestDate = rocDateToIso(daily?.[0]?.Date || "");
 const history = latestDate ? await getHistorySnapshots(latestDate, existingPayload?.history || {}) : { latestDate: "", periods: {} };
 if (latestDate) assertHistoryPayload(history);
 const payload = {
   daily,
-  companies,
+  companies: compactCompanies,
   tpexDaily,
   usDaily,
   // Keep the first payload small: it powers the dashboard, rankings, and quotes.
@@ -745,7 +752,7 @@ const historyPayload = {
   fetchedAt: payload.fetchedAt,
   history: {
     latestDate: history.latestDate,
-    dcaSeries: history.dcaSeries || {},
+    symbols: Object.keys(history.dcaSeries || {}).sort(),
   },
 };
 const manifest = {
@@ -758,6 +765,14 @@ const manifest = {
 };
 
 await mkdir(dirname(outFile), { recursive: true });
+await mkdir(historyChunkDir, { recursive: true });
+const historySeriesEntries = Object.entries(history.dcaSeries || {});
+const currentHistoryFiles = new Set(historySeriesEntries.map(([symbol]) => `${symbol}.js`));
+await Promise.all(
+  (await readdir(historyChunkDir))
+    .filter((file) => file.endsWith(".js") && !currentHistoryFiles.has(file))
+    .map((file) => unlink(resolve(historyChunkDir, file))),
+);
 await writeFile(
   outFile,
   `window.TWSE_MARKET_DATA = ${JSON.stringify(payload)};\n`,
@@ -767,6 +782,15 @@ await writeFile(
   historyOutFile,
   `window.TWSE_MARKET_HISTORY = ${JSON.stringify(historyPayload)};\n`,
   "utf8",
+);
+await Promise.all(
+  historySeriesEntries.map(([symbol, series]) =>
+    writeFile(
+      resolve(historyChunkDir, `${symbol}.js`),
+      `window.TWSE_MARKET_HISTORY_CHUNKS = window.TWSE_MARKET_HISTORY_CHUNKS || {};\nwindow.TWSE_MARKET_HISTORY_CHUNKS[${JSON.stringify(symbol)}] = ${JSON.stringify(series)};\n`,
+      "utf8",
+    ),
+  ),
 );
 await writeFile(
   manifestOutFile,

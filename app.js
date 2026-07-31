@@ -148,7 +148,9 @@ const FINMIND_DATA_URL = "https://api.finmindtrade.com/api/v4/data";
 const REMOTE_MARKET_MANIFEST_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-manifest.js";
 const REMOTE_MARKET_DATA_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-data.js";
 const REMOTE_MARKET_HISTORY_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/market-history.js";
+const REMOTE_MARKET_HISTORY_CHUNK_BASE_URL = "https://raw.githubusercontent.com/klland/stock-analysis/main/data/history";
 const LOCAL_MARKET_HISTORY_URL = "data/market-history.js";
+const LOCAL_MARKET_HISTORY_CHUNK_BASE_URL = "data/history";
 const CACHE_KEY = "decision-ledger-twse-cache-v1";
 const HISTORY_CLOSE_CACHE_KEY = "decision-ledger-history-close-cache-v1";
 const ADJUSTED_CLOSE_CACHE_KEY = "decision-ledger-close-cache-v2";
@@ -161,6 +163,10 @@ let marketHistoryLoadPromise = null;
 let marketHistoryLatestDate = "";
 let marketHistoryIsStale = false;
 let marketHistoryRefreshing = false;
+let marketHistoryAvailableSymbols = new Set();
+let marketHistoryPreferRemote = false;
+const marketHistoryChunkPromises = new Map();
+const marketPriceSeriesCache = new Map();
 let marketDataVersion = "";
 let marketManifest = null;
 const USER_STATE_KEY = "decision-ledger-user-state-v1";
@@ -175,6 +181,10 @@ let stockTrendChartState = { points: [], hoverIndex: null };
 let interactionToastTimer = null;
 let stockSearchActiveIndex = -1;
 let stockSearchResults = [];
+let stockTrendHoverFrame = 0;
+let hotStocksRenderFrame = 0;
+let historyRenderToken = 0;
+let historySectionObserver = null;
 
 const sectorNames = {
   "01": "水泥",
@@ -421,7 +431,24 @@ function bindNavigationState() {
       else link.removeAttribute("aria-current");
     });
   };
-  links.forEach((link) => link.addEventListener("click", () => activate(link)));
+  links.forEach((link) => link.addEventListener("click", (event) => {
+    event.preventDefault();
+    const section = document.querySelector(link.getAttribute("href"));
+    if (!section) return;
+    activate(link);
+    window.history.pushState(null, "", link.getAttribute("href"));
+    section.scrollIntoView({ behavior: "smooth", block: "start" });
+
+    // Lazy sections above the target can expand while scrolling. Re-anchor after
+    // those layouts settle so a navigation click always lands on its section.
+    [280, 760].forEach((delay) => {
+      window.setTimeout(() => {
+        if (window.location.hash === link.getAttribute("href")) {
+          section.scrollIntoView({ behavior: "auto", block: "start" });
+        }
+      }, delay);
+    });
+  }));
   let scheduled = false;
   window.addEventListener("scroll", () => {
     if (scheduled) return;
@@ -779,6 +806,12 @@ function parseMarketHistoryScript(text) {
   return match ? JSON.parse(match[1]) : null;
 }
 
+function parseMarketHistoryChunkScript(text) {
+  const match = String(text || "").match(/window\.TWSE_MARKET_HISTORY_CHUNKS\[("[^"]+")\] = (.*);\s*$/s);
+  if (!match) return null;
+  return { symbol: JSON.parse(match[1]), series: JSON.parse(match[2]) };
+}
+
 function parseMarketManifestScript(text) {
   const match = String(text || "").match(/^window\.TWSE_MARKET_MANIFEST = (.*);\s*$/s);
   const manifest = match ? JSON.parse(match[1]) : null;
@@ -809,6 +842,19 @@ async function fetchRemoteMarketHistory(manifest) {
   return payload;
 }
 
+async function fetchRemoteMarketHistoryChunk(symbol) {
+  const response = await fetch(
+    `${REMOTE_MARKET_HISTORY_CHUNK_BASE_URL}/${encodeURIComponent(symbol)}.js?v=${encodeURIComponent(marketDataVersion || Date.now())}`,
+    { cache: "force-cache" },
+  );
+  if (!response.ok) throw new Error(`Remote history chunk request failed for ${symbol}: ${response.status}`);
+  const chunk = parseMarketHistoryChunkScript(await response.text());
+  if (!chunk || chunk.symbol !== symbol || !chunk.series?.points?.length) {
+    throw new Error(`Remote history chunk is invalid for ${symbol}`);
+  }
+  return chunk.series;
+}
+
 async function fetchVerifiedRemoteMarketData() {
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -831,6 +877,27 @@ function loadLocalMarketHistoryScript() {
     script.async = true;
     script.onload = () => resolve(window.TWSE_MARKET_HISTORY || null);
     script.onerror = () => reject(new Error("Local market history script unavailable"));
+    document.head.append(script);
+  });
+}
+
+function loadLocalMarketHistoryChunkScript(symbol) {
+  const existing = window.TWSE_MARKET_HISTORY_CHUNKS?.[symbol];
+  if (existing?.points?.length) return Promise.resolve(existing);
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `${LOCAL_MARKET_HISTORY_CHUNK_BASE_URL}/${encodeURIComponent(symbol)}.js?v=${encodeURIComponent(marketDataVersion || Date.now())}`;
+    script.async = true;
+    script.onload = () => {
+      const series = window.TWSE_MARKET_HISTORY_CHUNKS?.[symbol];
+      if (series?.points?.length) resolve(series);
+      else reject(new Error(`Local history chunk is invalid for ${symbol}`));
+      script.remove();
+    };
+    script.onerror = () => {
+      script.remove();
+      reject(new Error(`Local history chunk unavailable for ${symbol}`));
+    };
     document.head.append(script);
   });
 }
@@ -1011,6 +1078,16 @@ async function historicalCloseSnapshotOnOrBefore(targetDate) {
     .sort((a, b) => b.date.localeCompare(a.date))[0];
   if (bundledSnapshot) return bundledSnapshot;
 
+  const bundledCloses = Object.fromEntries(
+    currentHistorySymbols()
+      .map((symbol) => [symbol, pricePointOnOrBefore(marketDcaSeries[symbol]?.points || [], targetDate)])
+      .filter(([, point]) => point?.value > 0 && point.date >= addDaysIso(targetDate, -14))
+      .map(([symbol, point]) => [symbol, point.value]),
+  );
+  if (Object.keys(bundledCloses).length) {
+    return { date: targetDate, closes: bundledCloses, source: "bundled" };
+  }
+
   const cache = readHistoryCloseCache();
   for (let offset = 0; offset <= 14; offset += 1) {
     const date = addDaysIso(targetDate, -offset);
@@ -1153,9 +1230,11 @@ async function adjustedHistoryFor(symbol, startDate, endDate) {
 }
 
 async function ensureFullHistoryFor(symbol) {
-  if (!stocks[symbol] || !isTaiwanSymbol(symbol)) return false;
+  if (!stocks[symbol]) return false;
+  await loadHistorySymbols([symbol]);
   const endDate = state.marketDataDate || priceDates.at(-1);
   const localPoints = localStockTrendPoints(symbol, "2000-01-01", endDate);
+  if (!isTaiwanSymbol(symbol)) return localPoints.length >= 2;
   if (localPoints[0]?.date && localPoints[0].date <= "2001-01-31") return true;
   try {
     const points = await adjustedHistoryFor(symbol, "2000-01-01", endDate);
@@ -1174,14 +1253,37 @@ async function ensureWatchlistFullHistories(symbols = state.watchlist) {
 }
 
 function pricePointOnOrAfter(points, date) {
-  return points.find((point) => point.date >= date) || points.at(-1) || null;
+  if (!points.length) return null;
+  let low = 0;
+  let high = points.length - 1;
+  let result = points.length;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    if (points[middle].date >= date) {
+      result = middle;
+      high = middle - 1;
+    } else {
+      low = middle + 1;
+    }
+  }
+  return points[result] || points.at(-1) || null;
 }
 
 function pricePointOnOrBefore(points, date) {
-  for (let index = points.length - 1; index >= 0; index -= 1) {
-    if (points[index].date <= date) return points[index];
+  if (!points.length) return null;
+  let low = 0;
+  let high = points.length - 1;
+  let result = -1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    if (points[middle].date <= date) {
+      result = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
   }
-  return null;
+  return result >= 0 ? points[result] : null;
 }
 
 function sortedPricePoints(points) {
@@ -1192,8 +1294,19 @@ function sortedPricePoints(points) {
 }
 
 function marketPriceSeries(symbol) {
+  if (marketPriceSeriesCache.has(symbol)) return marketPriceSeriesCache.get(symbol);
   const bundled = sortedPricePoints(marketDcaSeries[symbol]?.points || []);
-  if (bundled.length) return bundled;
+  if (bundled.length) {
+    const currentDate = state.marketDataDate || priceDates.at(-1);
+    const currentValue = toNumber(stocks[symbol]?.prices?.at(-1));
+    if (currentDate && currentValue > 0 && currentDate > bundled.at(-1).date) {
+      const series = [...bundled, { date: currentDate, value: currentValue, source: "current" }];
+      marketPriceSeriesCache.set(symbol, series);
+      return series;
+    }
+    marketPriceSeriesCache.set(symbol, bundled);
+    return bundled;
+  }
 
   const snapshotPoints = Object.values(marketHistoryPeriods)
     .filter((snapshot) => snapshot?.date && toNumber(snapshot.closes?.[symbol]) > 0)
@@ -1201,11 +1314,17 @@ function marketPriceSeries(symbol) {
   const currentDate = state.marketDataDate || priceDates.at(-1);
   const current = stocks[symbol]?.prices?.at(-1);
   if (currentDate && current > 0) snapshotPoints.push({ date: currentDate, value: current, source: "current" });
-  if (snapshotPoints.length) return sortedPricePoints(snapshotPoints);
+  if (snapshotPoints.length) {
+    const series = sortedPricePoints(snapshotPoints);
+    marketPriceSeriesCache.set(symbol, series);
+    return series;
+  }
 
-  return priceDates
+  const series = priceDates
     .map((date, index) => ({ date, value: toNumber(stocks[symbol]?.prices?.[index]), source: "sample" }))
     .filter((point) => point.value > 0);
+  marketPriceSeriesCache.set(symbol, series);
+  return series;
 }
 
 function marketPricePointOnOrBefore(symbol, date) {
@@ -1426,6 +1545,9 @@ function applyMarketPayload(payload) {
     marketHistoryReady = false;
     marketDcaSeries = {};
     marketDcaSnapshots = {};
+    marketHistoryAvailableSymbols = new Set();
+    marketHistoryChunkPromises.clear();
+    marketPriceSeriesCache.clear();
   }
   marketDataVersion = payload?.fetchedAt || marketDataVersion;
   const added = applyTwseMarketData(payload);
@@ -1435,7 +1557,6 @@ function applyMarketPayload(payload) {
   renderControls();
   render();
   renderDataSummary();
-  scheduleMarketHistoryLoad();
   return { added, tpexAdded, usAdded };
 }
 
@@ -1443,22 +1564,129 @@ function applyMarketHistory(payload, { allowStale = false, refreshing = false } 
   const history = payload?.history || payload;
   const isCurrentVersion = !marketDataVersion || !payload?.fetchedAt || payload.fetchedAt === marketDataVersion;
   if (!isCurrentVersion && !allowStale) return false;
-  if (!history || !Object.keys(history.dcaSeries || {}).length) return false;
+  if (!history) return false;
   marketHistoryPeriods = { ...marketHistoryPeriods, ...(history.periods || {}) };
   marketDcaSnapshots = { ...marketDcaSnapshots, ...(history.dcaMonthly || {}) };
-  marketDcaSeries = history.dcaSeries;
-  marketHistoryReady = true;
+  marketDcaSeries = { ...marketDcaSeries, ...(history.dcaSeries || {}) };
+  marketPriceSeriesCache.clear();
+  marketHistoryAvailableSymbols = new Set([
+    ...marketHistoryAvailableSymbols,
+    ...(history.symbols || []),
+    ...Object.keys(history.dcaSeries || {}),
+  ]);
   marketHistoryLatestDate = history.latestDate || "";
   marketHistoryIsStale = !isCurrentVersion;
   marketHistoryRefreshing = marketHistoryIsStale && refreshing;
-  renderDataSummary();
-  renderDcaEngine();
-  renderConditionalEngine();
-  renderStockTrend();
-  renderHotStocks();
-  renderAdvancedMetrics();
-  renderCharts();
   return true;
+}
+
+function currentHistorySymbols() {
+  return uniqueSymbols([
+    ...state.watchlist,
+    ...state.portfolioSymbols,
+    ...state.compareSymbols,
+    ...state.dcaSymbols,
+    ...state.conditionalSymbols,
+    state.benchmark,
+    state.riskSymbol,
+    state.stockTrendSymbol,
+    ...trades.map((trade) => trade.symbol),
+  ]);
+}
+
+async function loadHistorySymbol(symbol) {
+  if (!symbol || marketDcaSeries[symbol]?.points?.length) return true;
+  if (marketHistoryAvailableSymbols.size && !marketHistoryAvailableSymbols.has(symbol)) return false;
+  if (marketHistoryChunkPromises.has(symbol)) return marketHistoryChunkPromises.get(symbol);
+
+  const promise = (async () => {
+    const loaders = marketHistoryPreferRemote
+      ? [() => fetchRemoteMarketHistoryChunk(symbol), () => loadLocalMarketHistoryChunkScript(symbol)]
+      : [() => loadLocalMarketHistoryChunkScript(symbol), () => fetchRemoteMarketHistoryChunk(symbol)];
+    for (const load of loaders) {
+      try {
+        const series = await load();
+        if (series?.points?.length) {
+          marketDcaSeries[symbol] = series;
+          marketPriceSeriesCache.delete(symbol);
+          return true;
+        }
+      } catch (error) {
+        console.warn(error.message);
+      }
+    }
+    return false;
+  })().finally(() => marketHistoryChunkPromises.delete(symbol));
+  marketHistoryChunkPromises.set(symbol, promise);
+  return promise;
+}
+
+async function loadHistorySymbols(symbols) {
+  const targets = uniqueSymbols(symbols).filter((symbol) => !marketHistoryAvailableSymbols.size || marketHistoryAvailableSymbols.has(symbol));
+  if (targets.length === 0) return false;
+  await mapWithConcurrency(targets, 4, loadHistorySymbol);
+  return targets.every((symbol) => marketDcaSeries[symbol]?.points?.length);
+}
+
+function queueHistoryRenderTasks(tasks, token, schedule = window.requestAnimationFrame) {
+  const runNext = () => {
+    if (token !== historyRenderToken || tasks.length === 0) return;
+    const result = tasks.shift()();
+    if (result?.catch) result.catch((error) => console.warn(error.message));
+    if (tasks.length) schedule(runNext);
+  };
+  schedule(runNext);
+}
+
+function scheduleHistoryDependentRender() {
+  const token = ++historyRenderToken;
+  historySectionObserver?.disconnect();
+  historySectionObserver = null;
+
+  queueHistoryRenderTasks([renderScenarioRanking, renderCharts], token);
+
+  const lazySections = [
+    ["#portfolio", renderPortfolioEngine],
+    ["#compare", renderCompareEngine],
+    ["#dca", renderDcaEngine],
+    ["#conditional", renderConditionalEngine],
+    ["#stock-trend", renderStockTrend],
+    ["#advanced", renderAdvancedMetrics],
+    ["#what-if", renderSingleTradeAnalysis],
+  ]
+    .map(([selector, task]) => [$(selector), task])
+    .filter(([section]) => section);
+
+  if (!("IntersectionObserver" in window)) {
+    const idleSchedule = (callback) => {
+      if ("requestIdleCallback" in window) {
+        window.requestIdleCallback(callback, { timeout: 1200 });
+      } else {
+        window.setTimeout(callback, 80);
+      }
+    };
+    queueHistoryRenderTasks(lazySections.map(([, task]) => task), token, idleSchedule);
+    return;
+  }
+
+  const taskBySection = new Map(lazySections);
+  historySectionObserver = new IntersectionObserver((entries, observer) => {
+    if (token !== historyRenderToken) {
+      observer.disconnect();
+      return;
+    }
+    const tasks = entries
+      .filter((entry) => entry.isIntersecting)
+      .map((entry) => {
+        observer.unobserve(entry.target);
+        const task = taskBySection.get(entry.target);
+        taskBySection.delete(entry.target);
+        return task;
+      })
+      .filter(Boolean);
+    if (tasks.length) queueHistoryRenderTasks(tasks, token);
+  }, { rootMargin: "600px 0px" });
+  lazySections.forEach(([section]) => historySectionObserver.observe(section));
 }
 
 function scheduleMarketHistoryLoad() {
@@ -1483,21 +1711,30 @@ async function loadMarketHistory() {
         const local = await loadLocalMarketHistoryScript();
         const localIsCurrent = !marketDataVersion || !local?.fetchedAt || local.fetchedAt === marketDataVersion;
         localApplied = applyMarketHistory(local, { allowStale: true, refreshing: !localIsCurrent });
-        if (localApplied && localIsCurrent) return true;
+        marketHistoryPreferRemote = !localIsCurrent;
       } catch (error) {
         console.warn(`Local market history unavailable: ${error.message}`);
       }
-      try {
-        const manifest = marketManifest || await fetchRemoteMarketManifest();
-        const remote = await fetchRemoteMarketHistory(manifest);
-        return applyMarketHistory(remote);
-      } catch (error) {
-        console.warn(`Remote market history unavailable: ${error.message}`);
-        marketHistoryRefreshing = false;
-        renderDataSummary();
-        renderCharts();
-        return localApplied;
+      if (!localApplied) {
+        try {
+          const manifest = marketManifest || await fetchRemoteMarketManifest();
+          const remote = await fetchRemoteMarketHistory(manifest);
+          if (applyMarketHistory(remote)) marketHistoryPreferRemote = true;
+        } catch (error) {
+          console.warn(`Remote market history unavailable: ${error.message}`);
+          marketHistoryPreferRemote = false;
+        }
+      } else {
+        marketHistoryPreferRemote = false;
       }
+      const targets = currentHistorySymbols();
+      const loaded = await loadHistorySymbols(targets);
+      marketHistoryReady = loaded && targets.length > 0;
+      marketHistoryIsStale = Boolean(marketHistoryLatestDate && state.marketDataDate && marketHistoryLatestDate < state.marketDataDate);
+      marketHistoryRefreshing = false;
+      renderDataSummary();
+      scheduleHistoryDependentRender();
+      return marketHistoryReady;
     } finally {
       marketHistoryLoadPromise = null;
     }
@@ -1541,25 +1778,34 @@ async function loadDailyMarketData() {
       const { added, tpexAdded, usAdded } = applyMarketPayload(remote);
       writeCache({ ...remote, cachedAt: today });
       setMarketStatus(`已更新至 ${state.marketDataDate} 收盤資料。TWSE ${added}、TPEx ${tpexAdded}、美股 ${usAdded} 檔；歷史分析會在背景完成。`, "ok");
+      scheduleMarketHistoryLoad();
       return;
     }
     if (initial) {
       setMarketStatus(`資料已是最新可用版本：${state.marketDataDate}。歷史分析會在背景完成。`, "ok");
+      scheduleMarketHistoryLoad();
       return;
     }
   } catch (error) {
     console.warn(`Remote market data unavailable: ${error.message}`);
+    if (initial) {
+      setMarketStatus(`已顯示本地最新可用資料：${state.marketDataDate}。背景更新暫時無法連線。`, "warn");
+      scheduleMarketHistoryLoad();
+      return;
+    }
   }
 
   if (!initial && bundled?.fetchedAt && isFreshMarketPayload(bundled)) {
     const { added, tpexAdded, usAdded } = applyMarketPayload(bundled);
     setMarketStatus(`已載入本地每日資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔；排程會每天收盤後更新。`, "ok");
+    scheduleMarketHistoryLoad();
     return;
   }
 
   if (!initial && cache?.cachedAt === today) {
     const { added, tpexAdded, usAdded } = applyMarketPayload(cache);
     setMarketStatus(`已載入每日快取 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "ok");
+    scheduleMarketHistoryLoad();
     return;
   }
 
@@ -1570,15 +1816,18 @@ async function loadDailyMarketData() {
     writeCache(cachePayload);
     const { added, tpexAdded, usAdded } = applyMarketPayload(cachePayload);
     setMarketStatus(`已更新每日資料 ${state.marketDataDate}，TWSE ${added} 檔、TPEx ${tpexAdded} 檔；美股 ${usAdded} 檔沿用本地快照，會由每日更新腳本刷新。`, "ok");
+    scheduleMarketHistoryLoad();
   } catch (error) {
     console.warn(error);
     if (bundled?.fetchedAt) {
       const { added, tpexAdded, usAdded } = applyMarketPayload(bundled);
       setMarketStatus(`即時資料暫時無法載入，先使用本地快照 ${state.marketDataDate}：TWSE ${added} 檔、TPEx ${tpexAdded} 檔、美股 ${usAdded} 檔。`, "warn");
+      scheduleMarketHistoryLoad();
       return;
     }
     hydrateUserStateOnce();
     setMarketStatus("每日資料暫時無法載入，已改用內建樣本；重新整理時會再自動嘗試。", "warn");
+    scheduleMarketHistoryLoad();
   }
 }
 
@@ -1641,9 +1890,11 @@ function nearestDateIndex(date) {
 }
 
 function latestPrice(symbol) {
+  const current = toNumber(stocks[symbol]?.prices?.at(-1));
+  if (current > 0) return current;
   const latestDate = state.marketDataDate || priceDates.at(-1);
   const point = marketPricePointOnOrBefore(symbol, latestDate);
-  return point?.value || toNumber(stocks[symbol]?.prices?.at(-1));
+  return point?.value || 0;
 }
 
 function compareWindow(period = "1y") {
@@ -1806,6 +2057,7 @@ function hypotheticalTradeResult(trade, symbol, entryPoint) {
 async function entryPointForScenario(symbol, targetDate) {
   const bundledPoint = pricePointOnOrBefore(marketDcaSeries[symbol]?.points || [], targetDate);
   if (bundledPoint?.value > 0 && bundledPoint.date <= targetDate) return { date: bundledPoint.date, value: bundledPoint.value, source: "close" };
+  if (marketHistoryReady) return null;
   try {
     const adjusted = await adjustedCloseOnOrBefore(symbol, targetDate);
     if (adjusted?.value > 0) return adjusted;
@@ -1860,6 +2112,10 @@ function actualTradeResult(trade) {
 async function entryPointForHypothetical(symbol, targetDate, snapshot) {
   const bundledPoint = pricePointOnOrBefore(marketDcaSeries[symbol]?.points || [], targetDate);
   if (bundledPoint?.value > 0 && bundledPoint.date <= targetDate) return { date: bundledPoint.date, value: bundledPoint.value, source: "close" };
+  if (marketHistoryReady) {
+    const raw = toNumber(snapshot?.closes?.[symbol]);
+    return raw > 0 ? { date: snapshot.date, value: raw, source: "raw" } : null;
+  }
   try {
     const adjusted = await adjustedCloseOnOrBefore(symbol, targetDate);
     if (adjusted?.value > 0) return adjusted;
@@ -2577,6 +2833,7 @@ function localStockTrendPoints(symbol, startDate, endDate) {
 }
 
 async function stockTrendPoints(symbol, period = state.stockTrendPeriod) {
+  await loadHistorySymbols([symbol]);
   const { startDate, endDate } = stockTrendWindow(period);
   const localPoints = localStockTrendPoints(symbol, startDate, endDate);
   const needsLongHistory = period === "3m" || period === "6m" || period === "1y" || period === "5y" || period === "all";
@@ -2893,13 +3150,12 @@ function renderConditionalList() {
 function renderControls() {
   syncSelections();
   normalizeRankingPeriod();
-  const sortedEntries = Object.entries(stocks).sort((a, b) => (b[1].marketCap || 0) - (a[1].marketCap || 0));
   const list = visibleSymbols();
   const options = optionHtml(list);
   $("#benchmarkSelect").innerHTML = options;
   $("#symbolInput").innerHTML = options;
   $("#riskSymbol").innerHTML = options;
-  $("#stockTrendSymbol").innerHTML = optionHtml(sortedEntries.filter(([symbol]) => isTaiwanRankingSymbol(symbol) || stocks[symbol].market === "US").map(([symbol]) => symbol));
+  $("#stockTrendSymbol").innerHTML = options;
   $("#portfolioAddSelect").innerHTML = optionHtml(list.filter((symbol) => !state.portfolioSymbols.includes(symbol)));
   $("#compareAddSelect").innerHTML = optionHtml(list.filter((symbol) => !state.compareSymbols.includes(symbol)));
   $("#dcaAddSelect").innerHTML = optionHtml(list.filter((symbol) => !state.dcaSymbols.includes(symbol)));
@@ -3597,6 +3853,14 @@ function renderHotStocks() {
     .join("");
 }
 
+function scheduleHotStocksRender() {
+  if (hotStocksRenderFrame) return;
+  hotStocksRenderFrame = window.requestAnimationFrame(() => {
+    hotStocksRenderFrame = 0;
+    renderHotStocks();
+  });
+}
+
 async function renderStockTrend() {
   const token = ++stockTrendRenderToken;
   setPanelBusy("#stock-trend", true);
@@ -3745,20 +4009,31 @@ function renderCharts() {
   }
 }
 
+function renderHistoryLoadingPlaceholders() {
+  $("#scenarioRanking").innerHTML = `<div class="rank-row"><strong>正在準備替代結果</strong><small>完整日線會在背景載入，不影響目前股價與自選清單操作。</small></div>`;
+  $("#singleTradeAnalysis").innerHTML = "<p>完整日線載入後會自動顯示單筆交易分析。</p>";
+  $("#portfolioBasis").textContent = "正在背景載入投資組合需要的歷史日線。";
+  $("#portfolioResults").innerHTML = "";
+  $("#compareBasis").textContent = "正在背景載入比較標的的歷史日線。";
+  $("#compareBreakdown").innerHTML = "";
+  drawBarChart($("#compareBarChart"), []);
+  $("#advancedMetrics").innerHTML = `<div class="analysis-card"><span>分析狀態</span><strong>載入中</strong><small>日線完成後自動計算。</small></div>`;
+}
+
 function render() {
   renderMetrics();
-  renderScenarioRanking();
   renderTrades();
-  renderSingleTradeAnalysis();
-  renderPortfolioEngine();
-  renderCompareEngine();
-  renderDcaEngine();
-  renderConditionalEngine();
   renderMarketRanking();
   renderHotStocks();
-  renderStockTrend();
   renderRiskPosition();
-  renderAdvancedMetrics();
+  if (marketHistoryReady) {
+    scheduleHistoryDependentRender();
+    return;
+  }
+  renderHistoryLoadingPlaceholders();
+  renderDcaEngine();
+  renderConditionalEngine();
+  renderStockTrend();
   renderCharts();
 }
 
@@ -4035,7 +4310,7 @@ function bindEvents() {
     $(`#${selector}`).addEventListener("input", (event) => {
       state[key] = Number(event.target.value) || 0;
       saveUserState();
-      renderHotStocks();
+      scheduleHotStocksRender();
     });
   });
   [
@@ -4048,7 +4323,7 @@ function bindEvents() {
     $(`#${selector}`).addEventListener("input", (event) => {
       state.hotWeights[key] = Number(event.target.value) || 0;
       saveUserState();
-      renderHotStocks();
+      scheduleHotStocksRender();
     });
   });
   $("#stockTrendSymbol").addEventListener("change", (event) => {
@@ -4073,10 +4348,16 @@ function bindEvents() {
     const padding = { left: 18, right: 18 };
     const ratio = clamp((x - padding.left) / Math.max(1, canvas.width - padding.left - padding.right));
     const hoverIndex = Math.round(ratio * (points.length - 1));
-    stockTrendChartState = { ...stockTrendChartState, hoverIndex };
-    drawPriceChart(canvas, points, stockTrendChartState);
+    if (stockTrendChartState.hoverIndex === hoverIndex || stockTrendHoverFrame) return;
+    stockTrendHoverFrame = window.requestAnimationFrame(() => {
+      stockTrendHoverFrame = 0;
+      stockTrendChartState = { ...stockTrendChartState, hoverIndex };
+      drawPriceChart(canvas, points, stockTrendChartState);
+    });
   });
   $("#stockTrendChart").addEventListener("mouseleave", (event) => {
+    if (stockTrendHoverFrame) window.cancelAnimationFrame(stockTrendHoverFrame);
+    stockTrendHoverFrame = 0;
     const points = stockTrendChartState.points || [];
     stockTrendChartState = { ...stockTrendChartState, hoverIndex: null };
     drawPriceChart(event.currentTarget, points, stockTrendChartState);
@@ -4132,10 +4413,15 @@ function bindEvents() {
   });
 }
 
-renderControls();
 bindEvents();
-render();
-loadDailyMarketData();
+if (window.TWSE_MARKET_DATA) {
+  loadDailyMarketData();
+} else {
+  hydrateUserStateOnce();
+  renderControls();
+  render();
+  loadDailyMarketData();
+}
 
 setInterval(() => {
   const cache = readCache();

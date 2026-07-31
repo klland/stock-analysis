@@ -43,6 +43,7 @@ jobs:
           node --check data/market-manifest.js
           node --check data/market-data.js
           node --check data/market-history.js
+          for file in data/history/*.js; do node --check "$file"; done
 
       - name: Audit required symbols
         run: |
@@ -51,9 +52,12 @@ jobs:
           require('./data/market-manifest.js');
           require('./data/market-data.js');
           require('./data/market-history.js');
+          const requiredDcaSeries = ['0050', '006208', '00735', '00981A', '2308', '2317', '2330', '2454', 'AAPL', 'SPY', 'MU', 'SNDK'];
+          requiredDcaSeries.forEach((symbol) => require('./data/history/' + symbol + '.js'));
           const m = global.window.TWSE_MARKET_MANIFEST;
           const d = global.window.TWSE_MARKET_DATA;
           const h = global.window.TWSE_MARKET_HISTORY;
+          const chunks = global.window.TWSE_MARKET_HISTORY_CHUNKS || {};
           if (!m?.version || m.version !== d.fetchedAt || m.version !== h.fetchedAt || m.dataDate !== d.history?.latestDate) {
             console.error('Market manifest does not match summary and history payloads.');
             process.exit(1);
@@ -87,24 +91,23 @@ jobs:
             console.error('Missing TWSE history symbols: ' + missingHistorySymbols.join(', '));
             process.exit(1);
           }
-          const requiredDcaSeries = ['0050', '006208', '00735', '00981A', '2308', '2317', '2330', '2454', 'AAPL', 'SPY', 'MU', 'SNDK'];
-          const missingDcaSeries = requiredDcaSeries.filter((symbol) => (h.history?.dcaSeries?.[symbol]?.points || []).length < 120);
+          const missingDcaSeries = requiredDcaSeries.filter((symbol) => (chunks[symbol]?.points || []).length < 120);
           if (missingDcaSeries.length) {
             console.error('Missing DCA daily series: ' + missingDcaSeries.join(', '));
             process.exit(1);
           }
-          console.log('Market data date ' + d.date + '; TWSE ' + d.daily.length + ', TPEx ' + d.tpexDaily.length + ', companies ' + d.companies.length + ', US ' + d.usDaily.length + ', history ' + historyPeriods.join('/') + ', DCA series ' + Object.keys(h.history?.dcaSeries || {}).length + '.');
+          console.log('Market data date ' + d.date + '; TWSE ' + d.daily.length + ', TPEx ' + d.tpexDaily.length + ', companies ' + d.companies.length + ', US ' + d.usDaily.length + ', history ' + historyPeriods.join('/') + ', DCA series ' + (h.history?.symbols || []).length + '.');
           NODE
 
       - name: Commit refreshed data
         run: |
-          if git diff --quiet -- data/market-manifest.js data/market-data.js data/market-history.js; then
+          if git diff --quiet -- data/market-manifest.js data/market-data.js data/market-history.js data/history; then
             echo "No market data changes to commit."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/market-manifest.js data/market-data.js data/market-history.js
+          git add data/market-manifest.js data/market-data.js data/market-history.js data/history
           git commit -m "chore: update market data"
           git push
