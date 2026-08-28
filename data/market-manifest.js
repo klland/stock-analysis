@@ -1,1 +1,1 @@
-window.TWSE_MARKET_MANIFEST = {"version":"2026-08-27T19:04:24.864Z","dataDate":"2026-08-27","summary":"market-data.js","history":"market-history.js","usSymbols":216,"historySeries":227};
+window.TWSE_MARKET_MANIFEST = {"version":"2026-08-28T07:01:37.846Z","dataDate":"2026-08-28","summary":"market-data.js","history":"market-history.js","usSymbols":216,"historySeries":227};
